@@ -6,9 +6,10 @@ outstanding insurance balances at the service line level.
 """
 
 # ruff: noqa: S311
+import csv
 import random
 import string
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import pandas as pd
@@ -464,19 +465,77 @@ OPENAR_COLUMNS = [
 ]
 
 
+def _build_header_rows(
+    export_datetime: datetime,
+    num_columns: int,
+) -> list[list[Any]]:
+    """Build the metadata header rows for OpenAR output.
+
+    Returns a list of rows (each a list of values) matching the OpenAR export
+    format: Session Title, Session ID, Data Model, Population Base,
+    Population Criteria Filters, Session Date Range, Export User, Date of
+    Export, then an empty row.
+    """
+    # Format: "Mar  6 2026  7:58AM" (month abbrev, day with leading space, 12h)
+    session_id = export_datetime.strftime("%b %e %Y %l:%M%p").replace("  ", "  ")
+    export_date = export_datetime.strftime("%m/%d/%Y")
+
+    def _pad(row: list[Any]) -> list[Any]:
+        return row + [None] * max(0, num_columns - len(row))
+
+    return [
+        _pad(
+            [
+                "Session Title",
+                "Total Insurance Outstanding Amount by Service Date Age Range",
+            ]
+        ),
+        _pad(["Session ID", session_id]),
+        _pad(["Data Model", "Open AR (PB)"]),
+        _pad(["Population Base", "All Open AR (PB)"]),
+        _pad(
+            [
+                "Population Criteria Filters: These criteria are a summary"
+                " and do not fully reflect the content of the exported session.",
+                "Claim Form Type: Has Value",
+                "Transaction Type: Charge",
+                "Insurance Outstanding Amount: = $1",
+            ]
+        ),
+        _pad(["Session Date Range", "All Time"]),
+        _pad(["Export User", "System Generated"]),
+        _pad(["Date of Export", export_date]),
+        [None] * num_columns,  # Empty row
+    ]
+
+
 def write_openar_csv(
     ar_rows: list[dict[str, Any]],
     output_path: str,
+    export_datetime: datetime | None = None,
 ) -> None:
-    """Write OpenAR data to a CSV file.
+    """Write OpenAR data to a CSV file with header metadata.
 
     Args:
         ar_rows: List of AR row dictionaries
         output_path: Path to output CSV file
+        export_datetime: Timestamp for Session ID and Date of Export
     """
+    if export_datetime is None:
+        export_datetime = datetime.now()  # noqa: DTZ005
+
+    header_rows = _build_header_rows(export_datetime, len(OPENAR_COLUMNS))
+
     df = pd.DataFrame(ar_rows)
     df = df[OPENAR_COLUMNS]
-    df.to_csv(output_path, index=False)
+
+    with open(output_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        for row in header_rows:
+            writer.writerow(row)
+        writer.writerow(OPENAR_COLUMNS)
+        for data_row in df.values.tolist():
+            writer.writerow(data_row)
 
 
 MAX_EXCEL_ROWS = 1048576  # Excel's maximum row limit
@@ -485,13 +544,12 @@ MAX_EXCEL_ROWS = 1048576  # Excel's maximum row limit
 def write_openar_xlsx(
     ar_rows: list[dict[str, Any]],
     output_path: str,
-    session_id: str = "15216648",
+    export_datetime: datetime | None = None,
 ) -> None:
-    """
-    Write OpenAR data to an xlsx file with proper formatting.
+    """Write OpenAR data to an xlsx file with proper formatting.
 
     The output format matches the OpenAR export format:
-    - Rows 0-7: Session metadata (Session Title, Session ID, Data Model, etc.)
+    - Rows 0-7: Session metadata
     - Row 8: Empty row
     - Row 9: Column headers
     - Row 10+: Data rows
@@ -501,57 +559,28 @@ def write_openar_xlsx(
     Args:
         ar_rows: List of AR row dictionaries
         output_path: Path to output xlsx file
-        session_id: Session ID for the header
+        export_datetime: Timestamp for Session ID and Date of Export
     """
-    # Create DataFrame from rows
+    if export_datetime is None:
+        export_datetime = datetime.now()  # noqa: DTZ005
+
     df = pd.DataFrame(ar_rows)
+    df = df[OPENAR_COLUMNS]
 
-    columns = OPENAR_COLUMNS
+    header_data = _build_header_rows(export_datetime, len(OPENAR_COLUMNS))
+    header_data.append(OPENAR_COLUMNS)
 
-    # Reorder columns
-    df = df[columns]
-
-    # Create header metadata rows (rows 0-7)
-    header_data = [
-        [
-            "Session Title",
-            "Total Insurance Outstanding Amount by Service Date Age Range",
-        ]
-        + [None] * 20,
-        ["Session ID", session_id] + [None] * 20,
-        ["Data Model", "Open AR (PB)"] + [None] * 20,
-        ["Population Base", "All Open AR (PB)"] + [None] * 20,
-        [
-            "Population Criteria Filters: These criteria are a summary"
-            " and do not fully reflect the content of the exported session.",
-            "Claim Form Type: Has Value",
-            "Transaction Type: Charge",
-            "Insurance Outstanding Amount: ≥ $1",
-        ]
-        + [None] * 18,
-        ["Session Date Range", "All Time"] + [None] * 20,
-        ["Export User", "System Generated"] + [None] * 20,
-        ["Date of Export", date.today()] + [None] * 20,
-        [None] * 22,  # Empty row (row 8)
-        columns,  # Column headers (row 9)
-    ]
-
-    # Convert data rows to list format
     data_rows = df.values.tolist()
 
-    # Calculate rows per sheet (accounting for header rows)
     header_row_count = len(header_data)
     max_data_rows_per_sheet = MAX_EXCEL_ROWS - header_row_count
 
-    # Write to Excel, splitting across multiple sheets if needed
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         if len(data_rows) <= max_data_rows_per_sheet:
-            # Single sheet - all data fits
             all_rows = header_data + data_rows
             final_df = pd.DataFrame(all_rows)
             final_df.to_excel(writer, index=False, header=False, sheet_name="Sheet1")
         else:
-            # Multiple sheets needed
             sheet_num = 1
             for i in range(0, len(data_rows), max_data_rows_per_sheet):
                 chunk = data_rows[i : i + max_data_rows_per_sheet]
