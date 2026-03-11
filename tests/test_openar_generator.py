@@ -1,7 +1,8 @@
 """Tests for synthetic_edi_gen.openar_generator."""
 
+import csv
 import random
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -20,6 +21,8 @@ from synthetic_edi_gen.openar_generator import (
     write_openar_csv,
     write_openar_xlsx,
 )
+
+FIXED_DT = datetime(2026, 3, 6, 7, 58, 0)
 
 # ── Age bucket logic ──────────────────────────────────────────────────
 
@@ -272,7 +275,7 @@ class TestWriteOpenarXlsx:
     def test_creates_valid_xlsx(self, tmp_path, openar_generator):
         rows = openar_generator.generate_unmatched_ar_rows(5)
         output = str(tmp_path / "test.xlsx")
-        write_openar_xlsx(rows, output)
+        write_openar_xlsx(rows, output, export_datetime=FIXED_DT)
 
         df = pd.read_excel(output, header=None)
         # Row 0 = Session Title, Row 9 = column headers, Row 10+ = data
@@ -283,24 +286,28 @@ class TestWriteOpenarXlsx:
         row_count = 3
         rows = openar_generator.generate_unmatched_ar_rows(row_count)
         output = str(tmp_path / "test.xlsx")
-        write_openar_xlsx(rows, output)
+        write_openar_xlsx(rows, output, export_datetime=FIXED_DT)
 
         df = pd.read_excel(output, header=None)
         # 10 header rows + 3 data rows = 13 total
         assert len(df) == 10 + row_count
 
-    def test_custom_session_id(self, tmp_path, openar_generator):
+    def test_export_datetime_in_header(self, tmp_path, openar_generator):
         rows = openar_generator.generate_unmatched_ar_rows(1)
         output = str(tmp_path / "test.xlsx")
-        write_openar_xlsx(rows, output, session_id="CUSTOM123")
+        write_openar_xlsx(rows, output, export_datetime=FIXED_DT)
 
         df = pd.read_excel(output, header=None)
-        assert str(df.iloc[1, 1]) == "CUSTOM123"
+        session_id = str(df.iloc[1, 1])
+        assert "Mar" in session_id
+        assert "2026" in session_id
+        export_date = str(df.iloc[7, 1])
+        assert "03/06/2026" in export_date
 
     def test_column_headers_in_row_9(self, tmp_path, openar_generator):
         rows = openar_generator.generate_unmatched_ar_rows(1)
         output = str(tmp_path / "test.xlsx")
-        write_openar_xlsx(rows, output)
+        write_openar_xlsx(rows, output, export_datetime=FIXED_DT)
 
         df = pd.read_excel(output, header=None)
         headers = df.iloc[9].tolist()
@@ -312,27 +319,49 @@ class TestWriteOpenarXlsx:
 
 
 class TestWriteOpenarCsv:
-    def test_creates_valid_csv(self, tmp_path, openar_generator):
+    def _read_csv_raw(self, path: str) -> list[list[str]]:
+        """Read CSV as raw rows (no header interpretation)."""
+        with open(path, newline="") as f:
+            return list(csv.reader(f))
+
+    def test_header_rows_present(self, tmp_path, openar_generator):
+        rows = openar_generator.generate_unmatched_ar_rows(1)
+        output = str(tmp_path / "test.csv")
+        write_openar_csv(rows, output, export_datetime=FIXED_DT)
+
+        raw = self._read_csv_raw(output)
+        assert raw[0][0] == "Session Title"
+        assert raw[1][0] == "Session ID"
+        assert "Mar" in raw[1][1]
+        assert "2026" in raw[1][1]
+        assert raw[7][0] == "Date of Export"
+        assert raw[7][1] == "03/06/2026"
+        # Row 8 is empty, row 9 is column headers
+        assert raw[9][0] == OPENAR_COLUMNS[0]
+
+    def test_data_rows_after_header(self, tmp_path, openar_generator):
         rows = openar_generator.generate_unmatched_ar_rows(5)
         output = str(tmp_path / "test.csv")
-        write_openar_csv(rows, output)
+        write_openar_csv(rows, output, export_datetime=FIXED_DT)
 
-        df = pd.read_csv(output)
-        assert len(df) == 5
-
-    def test_has_correct_columns(self, tmp_path, openar_generator):
-        rows = openar_generator.generate_unmatched_ar_rows(3)
-        output = str(tmp_path / "test.csv")
-        write_openar_csv(rows, output)
-
-        df = pd.read_csv(output)
-        assert list(df.columns) == OPENAR_COLUMNS
+        raw = self._read_csv_raw(output)
+        # 9 header rows + 1 column header row + 5 data rows = 15
+        assert len(raw) == 15
 
     def test_data_values_preserved(self, tmp_path, openar_generator):
         rows = openar_generator.generate_unmatched_ar_rows(1)
         output = str(tmp_path / "test.csv")
-        write_openar_csv(rows, output)
+        write_openar_csv(rows, output, export_datetime=FIXED_DT)
 
-        df = pd.read_csv(output)
+        # Read skipping header rows (9 metadata + 1 column header = skip 9, header at row 9)
+        df = pd.read_csv(output, skiprows=9)
         assert df.iloc[0]["Invoice Number"].startswith("U")
         assert df.iloc[0]["Posted Amount ($)"] > 0
+
+    def test_has_correct_columns(self, tmp_path, openar_generator):
+        rows = openar_generator.generate_unmatched_ar_rows(3)
+        output = str(tmp_path / "test.csv")
+        write_openar_csv(rows, output, export_datetime=FIXED_DT)
+
+        df = pd.read_csv(output, skiprows=9)
+        assert list(df.columns) == OPENAR_COLUMNS

@@ -2,7 +2,7 @@
 
 # ruff: noqa: S311
 import random
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal, TextIO
 
@@ -157,6 +157,7 @@ def generate(
     claims_per_file: int = 10000,
     payments_per_file: int = 20,
     ar_format: Literal["csv", "xlsx"] = "csv",
+    export_datetime: datetime | None = None,
 ) -> None:
     """Generate fake but realistic EDI 835 and 837 messages.
 
@@ -175,6 +176,7 @@ def generate(
         claims_per_file: Max 837 claims per file (0 = single file)
         payments_per_file: Max 835 payments per file (0 = single file)
         ar_format: Output format for OpenAR data ('csv' or 'xlsx')
+        export_datetime: Timestamp for AR header (default: current local time)
     """
     if seed is not None:
         random.seed(seed)
@@ -274,9 +276,9 @@ def generate(
     openar_file = output_dir / f"openar.{ar_ext}"
     print(f"  Writing OpenAR {ar_format} file...")
     if ar_format == "csv":
-        write_openar_csv(ar_rows, str(openar_file))
+        write_openar_csv(ar_rows, str(openar_file), export_datetime=export_datetime)
     else:
-        write_openar_xlsx(ar_rows, str(openar_file))
+        write_openar_xlsx(ar_rows, str(openar_file), export_datetime=export_datetime)
 
     claims_written = claims_writer.total_written
     payments_written = payments_writer.total_written
