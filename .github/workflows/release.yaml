@@ -36,7 +36,7 @@ jobs:
         run: uv run synthetic-edi-gen --count ${{ matrix.count }} --seed 42 --output-dir ./output
 
       - name: Create tarball
-        run: tar --use-compress-program 'zstd -17' -cf synthetic-data-${{ matrix.label }}.tar.zst -C ./output .
+        run: tar --use-compress-program 'zstd -9' -cf synthetic-data-${{ matrix.label }}.tar.zst -C ./output .
 
       - name: Upload release artifact
         env:
