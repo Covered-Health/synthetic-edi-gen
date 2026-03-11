@@ -288,10 +288,7 @@ def generate(
     print(f"  Claims written: {claims_written:,} → {n_claim_files} file(s)")
     for f in claims_writer.files_created:
         print(f"    {f}")
-    print(
-        f"  Payments written: {payments_written:,}"
-        f" → {n_payment_files} file(s)"
-    )
+    print(f"  Payments written: {payments_written:,} → {n_payment_files} file(s)")
     for f in payments_writer.files_created:
         print(f"    {f}")
     print(f"  Match rate achieved: {payments_written / claims_written:.1%}")
