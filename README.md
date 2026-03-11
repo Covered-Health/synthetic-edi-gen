@@ -2,6 +2,12 @@
 
 Generate synthetic EDI 835 (payment/remittance) and 837 (claim) healthcare data for testing and demos.
 
+## Quick start
+
+```bash
+uvx --from git+https://github.com/Covered-Health/synthetic-edi-gen synthetic-edi-gen --count 1000 --seed 42
+```
+
 ## Usage
 
 ```bash
