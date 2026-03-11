@@ -25,8 +25,6 @@ jobs:
             label: "10k"
           - count: 100000
             label: "100k"
-          - count: 1000000
-            label: "1M"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
