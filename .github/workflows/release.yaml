@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - count: 1
+            label: "1"
+          - count: 10
+            label: "10"
+          - count: 100
+            label: "100"
+          - count: 1000
+            label: "1k"
+          - count: 10000
+            label: "10k"
+          - count: 100000
+            label: "100k"
+          - count: 1000000
+            label: "1M"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+
+      - name: Generate synthetic data (${{ matrix.label }} records)
+        run: uv run synthetic-edi-gen --count ${{ matrix.count }} --seed 42 --output-dir ./output
+
+      - name: Create tarball
+        run: tar -czf synthetic-data-${{ matrix.label }}.tgz -C ./output .
+
+      - name: Upload release artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.event.release.tag_name }}" synthetic-data-${{ matrix.label }}.tgz
