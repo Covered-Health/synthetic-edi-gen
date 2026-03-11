@@ -4,7 +4,7 @@
 import random
 from datetime import timedelta
 from pathlib import Path
-from typing import Annotated, TextIO
+from typing import Annotated, Literal, TextIO
 
 from cyclopts import Parameter
 from cyclopts.validators import Number
@@ -12,7 +12,11 @@ from cyclopts.validators import Number
 from synthetic_edi_gen._base import EDIBaseModel
 
 from .claim_generator import ClaimGenerator
-from .openar_generator import OpenARGenerator, write_openar_xlsx
+from .openar_generator import (
+    OpenARGenerator,
+    write_openar_csv,
+    write_openar_xlsx,
+)
 from .payment_generator import PaymentGenerator
 
 # Real-world distribution of PCNs per HAR, scaled 10x for multi-PCN groups.
@@ -67,6 +71,77 @@ def write_jsonl(file_handle: TextIO, record: EDIBaseModel) -> None:
     file_handle.write("\n")
 
 
+class SplitFileWriter:
+    """Writes JSONL records, rotating to a new file every `max_records` records.
+
+    When max_records is 0 or None, all records go to a single file (no splitting).
+    """
+
+    def __init__(
+        self,
+        output_dir: Path,
+        base_name: str,
+        extension: str = ".jsonl",
+        max_records: int = 0,
+    ):
+        self._output_dir = output_dir
+        self._base_name = base_name
+        self._extension = extension
+        self._max_records = max_records
+        self._current_file: TextIO | None = None
+        self._records_in_current_file = 0
+        self._file_index = 1
+        self._total_written = 0
+        self._files_created: list[Path] = []
+
+    def _current_path(self) -> Path:
+        if not self._max_records:
+            return self._output_dir / f"{self._base_name}{self._extension}"
+        return (
+            self._output_dir
+            / f"{self._base_name}_{self._file_index:03d}{self._extension}"
+        )
+
+    def _open_next_file(self) -> None:
+        if self._current_file is not None:
+            self._current_file.close()
+        path = self._current_path()
+        self._current_file = open(path, "w")  # noqa: SIM115
+        self._files_created.append(path)
+        self._records_in_current_file = 0
+
+    def write(self, record: EDIBaseModel) -> None:
+        if self._current_file is None:
+            self._open_next_file()
+        elif self._max_records and self._records_in_current_file >= self._max_records:
+            self._file_index += 1
+            self._open_next_file()
+
+        if self._current_file is None:  # pragma: no cover
+            msg = "File handle unexpectedly None"
+            raise RuntimeError(msg)
+        write_jsonl(self._current_file, record)
+        self._records_in_current_file += 1
+        self._total_written += 1
+
+    def flush(self) -> None:
+        if self._current_file is not None:
+            self._current_file.flush()
+
+    def close(self) -> None:
+        if self._current_file is not None:
+            self._current_file.close()
+            self._current_file = None
+
+    @property
+    def total_written(self) -> int:
+        return self._total_written
+
+    @property
+    def files_created(self) -> list[Path]:
+        return list(self._files_created)
+
+
 _DEFAULT_OUTPUT_DIR = Path("./edi_output")
 
 
@@ -79,6 +154,9 @@ def generate(
     ] = 0.05,
     seed: int | None = None,
     batch_size: int = 10000,
+    claims_per_file: int = 10000,
+    payments_per_file: int = 20,
+    ar_format: Literal["csv", "xlsx"] = "csv",
 ) -> None:
     """Generate fake but realistic EDI 835 and 837 messages.
 
@@ -94,6 +172,9 @@ def generate(
         unmatched_ar_rate: Percentage of additional unmatched AR rows, 0.0-1.0
         seed: Random seed for reproducibility
         batch_size: Batch size for progress reporting and disk flushing
+        claims_per_file: Max 837 claims per file (0 = single file)
+        payments_per_file: Max 835 payments per file (0 = single file)
+        ar_format: Output format for OpenAR data ('csv' or 'xlsx')
     """
     if seed is not None:
         random.seed(seed)
@@ -118,17 +199,17 @@ def generate(
     multi_pcn_hars = sum(1 for g in har_groups if g > 1)
     print(f"  HAR groups: {len(har_groups):,} ({multi_pcn_hars:,} with multiple PCNs)")
 
-    # Output files
-    claims_file = output_dir / "837_claims.jsonl"
-    payments_file = output_dir / "835_payments.jsonl"
-    openar_file = output_dir / "openar.xlsx"
-
-    claims_written = 0
-    payments_written = 0
     ar_rows: list[dict] = []
 
-    # Generate JSONL files
-    with open(claims_file, "w") as f_claims, open(payments_file, "w") as f_payments:
+    # Create split-aware writers for claims and payments
+    claims_writer = SplitFileWriter(
+        output_dir, "837_claims", ".jsonl", max_records=claims_per_file
+    )
+    payments_writer = SplitFileWriter(
+        output_dir, "835_payments", ".jsonl", max_records=payments_per_file
+    )
+
+    try:
         for group_size in har_groups:
             # One shared patient context per HAR group
             ctx = claim_gen.generate_patient_context()
@@ -147,15 +228,13 @@ def generate(
                     )
 
                 claim = claim_gen.generate_claim(ctx=ctx, service_date=svc_date)
-                write_jsonl(f_claims, claim)
-                claims_written += 1
+                claims_writer.write(claim)
 
                 # Independent payment per claim
                 payment = None
                 if random.random() < match_rate:
                     payment = payment_gen.generate_payment_for_claim(claim)
-                    write_jsonl(f_payments, payment)
-                    payments_written += 1
+                    payments_writer.write(payment)
 
                 # AR rows with shared HAR ID and MRN
                 claim_dict = claim.model_dump(by_alias=True, mode="json")
@@ -171,14 +250,17 @@ def generate(
                 ar_rows.extend(claim_ar_rows)
 
                 # Progress indicator
-                if claims_written % batch_size == 0:
-                    pct = claims_written / count * 100
+                if claims_writer.total_written % batch_size == 0:
+                    pct = claims_writer.total_written / count * 100
                     print(
-                        f"  Generated {claims_written:,}"
+                        f"  Generated {claims_writer.total_written:,}"
                         f" / {count:,} claims ({pct:.1f}%)"
                     )
-                    f_claims.flush()
-                    f_payments.flush()
+                    claims_writer.flush()
+                    payments_writer.flush()
+    finally:
+        claims_writer.close()
+        payments_writer.close()
 
     # Generate unmatched AR rows
     unmatched_count = int(count * unmatched_ar_rate)
@@ -187,13 +269,31 @@ def generate(
         unmatched_rows = openar_gen.generate_unmatched_ar_rows(unmatched_count)
         ar_rows.extend(unmatched_rows)
 
-    # Write OpenAR xlsx file
-    print("  Writing OpenAR xlsx file...")
-    write_openar_xlsx(ar_rows, str(openar_file))
+    # Write OpenAR file
+    ar_ext = "csv" if ar_format == "csv" else "xlsx"
+    openar_file = output_dir / f"openar.{ar_ext}"
+    print(f"  Writing OpenAR {ar_format} file...")
+    if ar_format == "csv":
+        write_openar_csv(ar_rows, str(openar_file))
+    else:
+        write_openar_xlsx(ar_rows, str(openar_file))
+
+    claims_written = claims_writer.total_written
+    payments_written = payments_writer.total_written
+
+    n_claim_files = len(claims_writer.files_created)
+    n_payment_files = len(payments_writer.files_created)
 
     print("\n✓ Generation complete!")
-    print(f"  Claims written: {claims_written:,} → {claims_file}")
-    print(f"  Payments written: {payments_written:,} → {payments_file}")
+    print(f"  Claims written: {claims_written:,} → {n_claim_files} file(s)")
+    for f in claims_writer.files_created:
+        print(f"    {f}")
+    print(
+        f"  Payments written: {payments_written:,}"
+        f" → {n_payment_files} file(s)"
+    )
+    for f in payments_writer.files_created:
+        print(f"    {f}")
     print(f"  Match rate achieved: {payments_written / claims_written:.1%}")
     print(f"  OpenAR rows written: {len(ar_rows):,} → {openar_file}")
     print(f"    (including {unmatched_count:,} unmatched rows)")

@@ -15,7 +15,9 @@ from conftest import (
 
 from synthetic_edi_gen.openar_generator import (
     FINANCIAL_CLASS_MAP,
+    OPENAR_COLUMNS,
     OpenARGenerator,
+    write_openar_csv,
     write_openar_xlsx,
 )
 
@@ -304,3 +306,33 @@ class TestWriteOpenarXlsx:
         headers = df.iloc[9].tolist()
         assert "Procedure Code" in headers
         assert "Insurance Outstanding Amount ($)" in headers
+
+
+# ── Write OpenAR CSV ─────────────────────────────────────────────────
+
+
+class TestWriteOpenarCsv:
+    def test_creates_valid_csv(self, tmp_path, openar_generator):
+        rows = openar_generator.generate_unmatched_ar_rows(5)
+        output = str(tmp_path / "test.csv")
+        write_openar_csv(rows, output)
+
+        df = pd.read_csv(output)
+        assert len(df) == 5
+
+    def test_has_correct_columns(self, tmp_path, openar_generator):
+        rows = openar_generator.generate_unmatched_ar_rows(3)
+        output = str(tmp_path / "test.csv")
+        write_openar_csv(rows, output)
+
+        df = pd.read_csv(output)
+        assert list(df.columns) == OPENAR_COLUMNS
+
+    def test_data_values_preserved(self, tmp_path, openar_generator):
+        rows = openar_generator.generate_unmatched_ar_rows(1)
+        output = str(tmp_path / "test.csv")
+        write_openar_csv(rows, output)
+
+        df = pd.read_csv(output)
+        assert df.iloc[0]["Invoice Number"].startswith("U")
+        assert df.iloc[0]["Posted Amount ($)"] > 0
