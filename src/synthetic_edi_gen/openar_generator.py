@@ -438,6 +438,47 @@ class OpenARGenerator:
         return self._transaction_id_counter
 
 
+OPENAR_COLUMNS = [
+    "Slices by Service Date Age (days)",
+    "Post Date",
+    "Professional Transaction ID",
+    "MRN",
+    "Current Financial Class",
+    "Current Plan",
+    "Current Payer",
+    "Billing Provider",
+    "Referring Provider",
+    "Service Date",
+    "Procedure Code",
+    "Modifiers (All)",
+    "Transaction Type",
+    "Posted Amount ($)",
+    "Claim Status",
+    "Crossover Status",
+    "Claim Form Type",
+    "Place of Service",
+    "Department",
+    "Hospital Account ID",
+    "Invoice Number",
+    "Insurance Outstanding Amount ($)",
+]
+
+
+def write_openar_csv(
+    ar_rows: list[dict[str, Any]],
+    output_path: str,
+) -> None:
+    """Write OpenAR data to a CSV file.
+
+    Args:
+        ar_rows: List of AR row dictionaries
+        output_path: Path to output CSV file
+    """
+    df = pd.DataFrame(ar_rows)
+    df = df[OPENAR_COLUMNS]
+    df.to_csv(output_path, index=False)
+
+
 MAX_EXCEL_ROWS = 1048576  # Excel's maximum row limit
 
 
@@ -465,31 +506,7 @@ def write_openar_xlsx(
     # Create DataFrame from rows
     df = pd.DataFrame(ar_rows)
 
-    # Column order (matching example file)
-    columns = [
-        "Slices by Service Date Age (days)",
-        "Post Date",
-        "Professional Transaction ID",
-        "MRN",
-        "Current Financial Class",
-        "Current Plan",
-        "Current Payer",
-        "Billing Provider",
-        "Referring Provider",
-        "Service Date",
-        "Procedure Code",
-        "Modifiers (All)",
-        "Transaction Type",
-        "Posted Amount ($)",
-        "Claim Status",
-        "Crossover Status",
-        "Claim Form Type",
-        "Place of Service",
-        "Department",
-        "Hospital Account ID",
-        "Invoice Number",
-        "Insurance Outstanding Amount ($)",
-    ]
+    columns = OPENAR_COLUMNS
 
     # Reorder columns
     df = df[columns]

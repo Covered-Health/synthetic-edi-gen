@@ -2,7 +2,12 @@
 
 import json
 
-from synthetic_edi_gen.generate import _plan_har_groups, generate, write_jsonl
+from synthetic_edi_gen.generate import (
+    SplitFileWriter,
+    _plan_har_groups,
+    generate,
+    write_jsonl,
+)
 
 
 class TestPlanHarGroups:
@@ -57,13 +62,34 @@ class TestWriteJsonl:
         assert len(lines) == 3
 
 
+def _read_all_jsonl(output_dir, prefix):
+    """Read all JSONL lines from split or single files matching a prefix."""
+    import glob
+
+    pattern = str(output_dir / f"{prefix}*.jsonl")
+    lines = []
+    for path in sorted(glob.glob(pattern)):
+        with open(path) as fh:
+            text = fh.read().strip()
+        if text:
+            lines.extend(text.split("\n"))
+    return lines
+
+
 class TestGenerate:
     def test_creates_output_files(self, tmp_path):
         output_dir = tmp_path / "output"
         generate(count=5, output_dir=output_dir, seed=42)
 
-        assert (output_dir / "837_claims.jsonl").exists()
-        assert (output_dir / "835_payments.jsonl").exists()
+        # With default splitting, files get _001 suffix
+        assert (output_dir / "837_claims_001.jsonl").exists()
+        assert (output_dir / "835_payments_001.jsonl").exists()
+        # Default AR format is csv
+        assert (output_dir / "openar.csv").exists()
+
+    def test_creates_xlsx_when_requested(self, tmp_path):
+        output_dir = tmp_path / "output"
+        generate(count=5, output_dir=output_dir, seed=42, ar_format="xlsx")
         assert (output_dir / "openar.xlsx").exists()
 
     def test_correct_claim_count(self, tmp_path):
@@ -71,8 +97,7 @@ class TestGenerate:
         output_dir = tmp_path / "output"
         generate(count=count, output_dir=output_dir, seed=42)
 
-        claims_file = output_dir / "837_claims.jsonl"
-        lines = [line for line in claims_file.read_text().strip().split("\n") if line]
+        lines = _read_all_jsonl(output_dir, "837_claims")
         assert len(lines) == count
 
     def test_match_rate_controls_payment_count(self, tmp_path):
@@ -80,8 +105,7 @@ class TestGenerate:
         output_dir = tmp_path / "output"
         generate(count=count, output_dir=output_dir, seed=42, match_rate=0.5)
 
-        payments_file = output_dir / "835_payments.jsonl"
-        lines = [line for line in payments_file.read_text().strip().split("\n") if line]
+        lines = _read_all_jsonl(output_dir, "835_payments")
         # With 50% match rate and 20 claims, expect roughly 10 payments (±5)
         assert 5 <= len(lines) <= 15
 
@@ -89,8 +113,7 @@ class TestGenerate:
         output_dir = tmp_path / "output"
         generate(count=5, output_dir=output_dir, seed=42)
 
-        claims_file = output_dir / "837_claims.jsonl"
-        for line in claims_file.read_text().strip().split("\n"):
+        for line in _read_all_jsonl(output_dir, "837_claims"):
             record = json.loads(line)
             assert record["objectType"] == "CLAIM"
             assert "patientControlNumber" in record
@@ -99,8 +122,7 @@ class TestGenerate:
         output_dir = tmp_path / "output"
         generate(count=5, output_dir=output_dir, seed=42)
 
-        payments_file = output_dir / "835_payments.jsonl"
-        for line in payments_file.read_text().strip().split("\n"):
+        for line in _read_all_jsonl(output_dir, "835_payments"):
             if line:
                 record = json.loads(line)
                 assert record["objectType"] == "PAYMENT"
@@ -113,8 +135,7 @@ class TestGenerate:
             seed=42,
             unmatched_ar_rate=0.10,
         )
-        # Just verify the xlsx was created; detailed content tested in openar tests
-        assert (output_dir / "openar.xlsx").exists()
+        assert (output_dir / "openar.csv").exists()
 
     def test_seed_reproducibility(self, tmp_path):
         """Same seed produces same PCNs and charge amounts (ignoring UUIDs/timestamps)."""
@@ -124,12 +145,12 @@ class TestGenerate:
         generate(count=5, output_dir=dir1, seed=99)
         generate(count=5, output_dir=dir2, seed=99)
 
-        def extract_stable_fields(claims_text):
-            records = [json.loads(raw) for raw in claims_text.strip().split("\n")]
+        def extract_stable_fields(lines):
+            records = [json.loads(raw) for raw in lines]
             return [(r["patientControlNumber"], r["chargeAmount"]) for r in records]
 
-        fields1 = extract_stable_fields((dir1 / "837_claims.jsonl").read_text())
-        fields2 = extract_stable_fields((dir2 / "837_claims.jsonl").read_text())
+        fields1 = extract_stable_fields(_read_all_jsonl(dir1, "837_claims"))
+        fields2 = extract_stable_fields(_read_all_jsonl(dir2, "837_claims"))
         assert fields1 == fields2
 
     def test_multi_pcn_har_groups_share_patient(self, tmp_path):
@@ -137,9 +158,8 @@ class TestGenerate:
         output_dir = tmp_path / "output"
         generate(count=200, output_dir=output_dir, seed=42)
 
-        claims_file = output_dir / "837_claims.jsonl"
         claims = []
-        for line in claims_file.read_text().strip().split("\n"):
+        for line in _read_all_jsonl(output_dir, "837_claims"):
             claims.append(json.loads(line))
 
         # Group claims by billing provider NPI (shared within HAR group)
@@ -162,3 +182,88 @@ class TestGenerate:
                     patient["lastNameOrOrgName"] == first_patient["lastNameOrOrgName"]
                 )
             break  # only need to verify one group
+
+    def test_no_splitting_with_zero(self, tmp_path):
+        """claims_per_file=0 produces single unsuffixed file."""
+        output_dir = tmp_path / "output"
+        generate(
+            count=5,
+            output_dir=output_dir,
+            seed=42,
+            claims_per_file=0,
+            payments_per_file=0,
+        )
+        assert (output_dir / "837_claims.jsonl").exists()
+        assert (output_dir / "835_payments.jsonl").exists()
+
+    def test_splitting_creates_multiple_claim_files(self, tmp_path):
+        output_dir = tmp_path / "output"
+        generate(
+            count=10,
+            output_dir=output_dir,
+            seed=42,
+            claims_per_file=3,
+        )
+        # 10 claims / 3 per file = 4 files (3+3+3+1)
+        import glob
+
+        claim_files = sorted(glob.glob(str(output_dir / "837_claims_*.jsonl")))
+        assert len(claim_files) == 4
+        # Total lines across all files should equal count
+        lines = _read_all_jsonl(output_dir, "837_claims")
+        assert len(lines) == 10
+
+    def test_splitting_creates_multiple_payment_files(self, tmp_path):
+        output_dir = tmp_path / "output"
+        generate(
+            count=10,
+            output_dir=output_dir,
+            seed=42,
+            match_rate=1.0,
+            payments_per_file=3,
+        )
+        import glob
+
+        payment_files = sorted(glob.glob(str(output_dir / "835_payments_*.jsonl")))
+        # 10 payments / 3 per file = 4 files
+        assert len(payment_files) == 4
+        lines = _read_all_jsonl(output_dir, "835_payments")
+        assert len(lines) == 10
+
+
+# ── SplitFileWriter ──────────────────────────────────────────────────
+
+
+class TestSplitFileWriter:
+    def test_single_file_when_disabled(self, tmp_path, claim_generator):
+        writer = SplitFileWriter(tmp_path, "test", ".jsonl", max_records=0)
+        for _ in range(5):
+            writer.write(claim_generator.generate_claim())
+        writer.close()
+
+        assert len(writer.files_created) == 1
+        assert writer.files_created[0].name == "test.jsonl"
+        assert writer.total_written == 5
+
+    def test_splits_at_max_records(self, tmp_path, claim_generator):
+        writer = SplitFileWriter(tmp_path, "test", ".jsonl", max_records=2)
+        for _ in range(5):
+            writer.write(claim_generator.generate_claim())
+        writer.close()
+
+        assert len(writer.files_created) == 3  # 2+2+1
+        assert writer.files_created[0].name == "test_001.jsonl"
+        assert writer.files_created[1].name == "test_002.jsonl"
+        assert writer.files_created[2].name == "test_003.jsonl"
+
+    def test_each_split_file_has_valid_jsonl(self, tmp_path, claim_generator):
+        writer = SplitFileWriter(tmp_path, "test", ".jsonl", max_records=2)
+        for _ in range(5):
+            writer.write(claim_generator.generate_claim())
+        writer.close()
+
+        for path in writer.files_created:
+            lines = path.read_text().strip().split("\n")
+            for line in lines:
+                record = json.loads(line)
+                assert "patientControlNumber" in record
