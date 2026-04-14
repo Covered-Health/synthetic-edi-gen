@@ -216,7 +216,9 @@ class TestGenerate:
         )
 
         # Also verify that claims for the same MRN share patient demographics
-        claims = [json.loads(line) for line in _read_all_jsonl(output_dir, "837_claims")]
+        claims = [
+            json.loads(line) for line in _read_all_jsonl(output_dir, "837_claims")
+        ]
 
         # Build mapping: PCN → patient demographics
         pcn_to_patient = {}
@@ -250,7 +252,9 @@ class TestGenerate:
         # Use a large-ish count so encounter sequences are likely to trigger.
         generate(count=1000, output_dir=output_dir, seed=7)
 
-        claims = [json.loads(line) for line in _read_all_jsonl(output_dir, "837_claims")]
+        claims = [
+            json.loads(line) for line in _read_all_jsonl(output_dir, "837_claims")
+        ]
 
         # Group claims by (patient first name, last name, DoB) to find
         # patients with multiple visits.
@@ -276,9 +280,7 @@ class TestGenerate:
                     visit_cpts.add(proc.get("code", ""))
                 cpts_across_visits.append(visit_cpts)
 
-            has_surgery = any(
-                cpts & surgical_cpts for cpts in cpts_across_visits
-            )
+            has_surgery = any(cpts & surgical_cpts for cpts in cpts_across_visits)
             has_office_visit = any(
                 cpts & {"99213", "99204", "99205", "99214"}
                 for cpts in cpts_across_visits
