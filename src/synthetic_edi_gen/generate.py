@@ -2,7 +2,8 @@
 
 # ruff: noqa: S311
 import random
-from datetime import datetime, timedelta
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal, TextIO
 
@@ -11,7 +12,8 @@ from cyclopts.validators import Number
 
 from synthetic_edi_gen._base import EDIBaseModel
 
-from .claim_generator import ClaimGenerator
+from .claim_generator import ClaimGenerator, PatientContext
+from .helpers import generate_service_date
 from .openar_generator import (
     OpenARGenerator,
     write_openar_csv,
@@ -47,6 +49,164 @@ _MULTI_PCN_DISTRIBUTION: list[tuple[int, int]] = [
 
 _PCN_COUNTS = [n for n, _ in _MULTI_PCN_DISTRIBUTION]
 _PCN_WEIGHTS = [w for _, w in _MULTI_PCN_DISTRIBUTION]
+
+# Fraction of HAR groups that reuse an existing patient (same MRN, name, DoB).
+# This models patients with multiple encounters over time.
+_PATIENT_REUSE_RATE = 0.15
+
+# Maximum number of distinct patients to keep in the reuse registry.
+_MAX_PATIENT_REGISTRY = 500
+
+# Fraction of patient-reuse encounters that follow a structured clinical
+# sequence (surgery pathway, repeat visit) rather than random reuse.
+_ENCOUNTER_SEQUENCE_RATE = 0.40
+
+
+@dataclass(frozen=True)
+class _EncounterStep:
+    """One visit in a multi-encounter sequence."""
+
+    # Service date offset in days relative to the anchor date.
+    # Negative = before anchor, positive = after.
+    days_offset_min: int
+    days_offset_max: int
+    cpt_codes: list[str]
+    icd10_codes: list[str]
+
+
+# Pre-defined clinical encounter sequences.
+# Each sequence is a list of steps; the anchor date is the "main" event.
+_ENCOUNTER_SEQUENCES: list[list[_EncounterStep]] = [
+    # ── Surgery pathway: pre-op consult → surgery → post-op follow-up ──
+    [
+        _EncounterStep(
+            days_offset_min=-21,
+            days_offset_max=-7,
+            cpt_codes=["99205"],
+            icd10_codes=["M17.11"],
+        ),
+        _EncounterStep(
+            days_offset_min=0,
+            days_offset_max=0,
+            cpt_codes=["27447"],
+            icd10_codes=["M17.11"],
+        ),
+        _EncounterStep(
+            days_offset_min=14,
+            days_offset_max=28,
+            cpt_codes=["99213"],
+            icd10_codes=["M17.11"],
+        ),
+    ],
+    # ── Cholecystectomy pathway ──
+    [
+        _EncounterStep(
+            days_offset_min=-14,
+            days_offset_max=-5,
+            cpt_codes=["99205"],
+            icd10_codes=["K80.20"],
+        ),
+        _EncounterStep(
+            days_offset_min=0,
+            days_offset_max=0,
+            cpt_codes=["47562"],
+            icd10_codes=["K80.20"],
+        ),
+        _EncounterStep(
+            days_offset_min=10,
+            days_offset_max=21,
+            cpt_codes=["99213"],
+            icd10_codes=["K80.20"],
+        ),
+    ],
+    # ── Knee arthroscopy pathway ──
+    [
+        _EncounterStep(
+            days_offset_min=-14,
+            days_offset_max=-7,
+            cpt_codes=["99204"],
+            icd10_codes=["M23.21"],
+        ),
+        _EncounterStep(
+            days_offset_min=0,
+            days_offset_max=0,
+            cpt_codes=["29881"],
+            icd10_codes=["M23.21"],
+        ),
+        _EncounterStep(
+            days_offset_min=7,
+            days_offset_max=14,
+            cpt_codes=["99213"],
+            icd10_codes=["M23.21"],
+        ),
+    ],
+    # ── Hernia repair pathway ──
+    [
+        _EncounterStep(
+            days_offset_min=-10,
+            days_offset_max=-3,
+            cpt_codes=["99204"],
+            icd10_codes=["K40.90"],
+        ),
+        _EncounterStep(
+            days_offset_min=0,
+            days_offset_max=0,
+            cpt_codes=["49505"],
+            icd10_codes=["K40.90"],
+        ),
+        _EncounterStep(
+            days_offset_min=10,
+            days_offset_max=21,
+            cpt_codes=["99213"],
+            icd10_codes=["K40.90"],
+        ),
+    ],
+    # ── Repeat visit: same chronic condition ~6 months apart ──
+    [
+        _EncounterStep(
+            days_offset_min=-200,
+            days_offset_max=-150,
+            cpt_codes=["99214"],
+            icd10_codes=["I10", "E11.9"],
+        ),
+        _EncounterStep(
+            days_offset_min=0,
+            days_offset_max=0,
+            cpt_codes=["99214", "80053"],
+            icd10_codes=["I10", "E11.9"],
+        ),
+    ],
+    # ── Repeat visit: same issue ~3 months apart ──
+    [
+        _EncounterStep(
+            days_offset_min=-100,
+            days_offset_max=-80,
+            cpt_codes=["99214"],
+            icd10_codes=["M54.9"],
+        ),
+        _EncounterStep(
+            days_offset_min=0,
+            days_offset_max=0,
+            cpt_codes=["99214"],
+            icd10_codes=["M54.9"],
+        ),
+    ],
+    # ── Repeat visit: respiratory follow-up ──
+    [
+        _EncounterStep(
+            days_offset_min=-90,
+            days_offset_max=-60,
+            cpt_codes=["99213", "71046"],
+            icd10_codes=["J44.9"],
+        ),
+        _EncounterStep(
+            days_offset_min=0,
+            days_offset_max=0,
+            cpt_codes=["99214"],
+            icd10_codes=["J44.9"],
+        ),
+    ],
+]
 
 
 def _plan_har_groups(total_claims: int) -> list[int]:
@@ -203,6 +363,10 @@ def generate(
 
     ar_rows: list[dict] = []
 
+    # Patient registry: returning patients share the same MRN, name, DoB,
+    # etc. across different encounters.  MRN is stored on each context.
+    patient_registry: list[PatientContext] = []
+
     # Create split-aware writers for claims and payments
     claims_writer = SplitFileWriter(
         output_dir, "837_claims", ".jsonl", max_records=claims_per_file
@@ -211,55 +375,123 @@ def generate(
         output_dir, "835_payments", ".jsonl", max_records=payments_per_file
     )
 
+    def _emit_har_group(
+        ctx: PatientContext,
+        group_size: int,
+        forced_cpt_codes: list[str] | None = None,
+        forced_icd10_codes: list[str] | None = None,
+    ) -> None:
+        """Generate and write all claims for one HAR group."""
+        har_id = openar_gen._generate_hospital_account_id()
+
+        for _claim_idx in range(group_size):
+            # PB: same date; HB (group_size > 3): spread across 1-14 days
+            if group_size <= 3:
+                svc_date = ctx.base_service_date
+            else:
+                svc_date = ctx.base_service_date + timedelta(
+                    days=random.randint(0, min(14, group_size))
+                )
+
+            claim = claim_gen.generate_claim(
+                ctx=ctx,
+                service_date=svc_date,
+                forced_cpt_codes=forced_cpt_codes,
+                forced_icd10_codes=forced_icd10_codes,
+            )
+            claims_writer.write(claim)
+
+            # Independent payment per claim
+            payment = None
+            if random.random() < match_rate:
+                payment = payment_gen.generate_payment_for_claim(claim)
+                payments_writer.write(payment)
+
+            # AR rows with shared HAR ID and MRN
+            claim_dict = claim.model_dump(by_alias=True, mode="json")
+            payment_dict = (
+                payment.model_dump(by_alias=True, mode="json") if payment else None
+            )
+            claim_ar_rows = openar_gen.generate_ar_rows_for_claim(
+                claim_dict,
+                payment_dict,
+                hospital_account_id=har_id,
+                mrn=ctx.mrn,
+            )
+            ar_rows.extend(claim_ar_rows)
+
+            # Progress indicator
+            if claims_writer.total_written % batch_size == 0:
+                pct = claims_writer.total_written / count * 100
+                print(
+                    f"  Generated {claims_writer.total_written:,}"
+                    f" / {count:,} claims ({pct:.1f}%)"
+                )
+                claims_writer.flush()
+                payments_writer.flush()
+
     try:
-        for group_size in har_groups:
-            # One shared patient context per HAR group
-            ctx = claim_gen.generate_patient_context()
+        group_idx = 0
+        while group_idx < len(har_groups):
+            group_size = har_groups[group_idx]
 
-            # Shared AR identifiers for the group
-            har_id = openar_gen._generate_hospital_account_id()
-            mrn = openar_gen._generate_mrn()
-
-            for _claim_idx in range(group_size):
-                # PB: same date; HB (group_size > 3): spread across 1-14 days
-                if group_size <= 3:
-                    svc_date = ctx.base_service_date
-                else:
-                    svc_date = ctx.base_service_date + timedelta(
-                        days=random.randint(0, min(14, group_size))
-                    )
-
-                claim = claim_gen.generate_claim(ctx=ctx, service_date=svc_date)
-                claims_writer.write(claim)
-
-                # Independent payment per claim
-                payment = None
-                if random.random() < match_rate:
-                    payment = payment_gen.generate_payment_for_claim(claim)
-                    payments_writer.write(payment)
-
-                # AR rows with shared HAR ID and MRN
-                claim_dict = claim.model_dump(by_alias=True, mode="json")
-                payment_dict = (
-                    payment.model_dump(by_alias=True, mode="json") if payment else None
+            if patient_registry and random.random() < _PATIENT_REUSE_RATE:
+                # Returning patient — decide between a structured encounter
+                # sequence and a simple random revisit.
+                seq = random.choice(_ENCOUNTER_SEQUENCES)
+                steps_remaining = len(har_groups) - group_idx
+                use_sequence = (
+                    random.random() < _ENCOUNTER_SEQUENCE_RATE
+                    and steps_remaining >= len(seq)
                 )
-                claim_ar_rows = openar_gen.generate_ar_rows_for_claim(
-                    claim_dict,
-                    payment_dict,
-                    hospital_account_id=har_id,
-                    mrn=mrn,
-                )
-                ar_rows.extend(claim_ar_rows)
 
-                # Progress indicator
-                if claims_writer.total_written % batch_size == 0:
-                    pct = claims_writer.total_written / count * 100
-                    print(
-                        f"  Generated {claims_writer.total_written:,}"
-                        f" / {count:,} claims ({pct:.1f}%)"
-                    )
-                    claims_writer.flush()
-                    payments_writer.flush()
+                if use_sequence:
+                    # Structured clinical sequence (e.g. consult → surgery → follow-up)
+                    mrn = openar_gen._generate_mrn()
+                    ctx = claim_gen.generate_patient_context()
+                    ctx = replace(ctx, mrn=mrn)
+                    if len(patient_registry) < _MAX_PATIENT_REGISTRY:
+                        patient_registry.append(ctx)
+
+                    # Anchor date: the "main" event sits 30-60 days in the past
+                    # so both earlier and later steps fall within a plausible window.
+                    anchor = date.today() - timedelta(days=random.randint(30, 60))
+
+                    for step in seq:
+                        step_size = har_groups[group_idx]
+                        offset = random.randint(
+                            step.days_offset_min, step.days_offset_max
+                        )
+                        step_date = anchor + timedelta(days=offset)
+                        step_ctx = replace(ctx, base_service_date=step_date)
+
+                        _emit_har_group(
+                            step_ctx,
+                            step_size,
+                            forced_cpt_codes=step.cpt_codes,
+                            forced_icd10_codes=step.icd10_codes,
+                        )
+                        group_idx += 1
+                    continue
+
+                # Simple random revisit — same patient, new service date.
+                existing_ctx = random.choice(patient_registry)
+                ctx = replace(
+                    existing_ctx,
+                    base_service_date=generate_service_date(
+                        days_ago_min=1, days_ago_max=90
+                    ),
+                )
+            else:
+                # New patient
+                mrn = openar_gen._generate_mrn()
+                ctx = claim_gen.generate_patient_context()
+                ctx = replace(ctx, mrn=mrn)
+                if len(patient_registry) < _MAX_PATIENT_REGISTRY:
+                    patient_registry.append(ctx)
+
+            _emit_har_group(ctx, group_size)
+            group_idx += 1
     finally:
         claims_writer.close()
         payments_writer.close()

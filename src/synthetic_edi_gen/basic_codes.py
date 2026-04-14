@@ -93,6 +93,48 @@ BASIC_CPT_CODES = [
         specialty="Radiology",
         common_icd10=["S93.40XA", "M25.571"],
     ),
+    # Surgical procedures
+    BasicCPTCode(
+        code="27447",
+        description="Total knee arthroplasty",
+        min_cost=1800.00,
+        max_cost=3500.00,
+        specialty="Orthopedics",
+        common_icd10=["M17.11", "M17.12"],
+    ),
+    BasicCPTCode(
+        code="47562",
+        description="Laparoscopic cholecystectomy",
+        min_cost=1200.00,
+        max_cost=2800.00,
+        specialty="General Surgery",
+        common_icd10=["K80.20", "K81.0"],
+    ),
+    BasicCPTCode(
+        code="29881",
+        description="Arthroscopy, knee, surgical; with meniscectomy",
+        min_cost=900.00,
+        max_cost=2200.00,
+        specialty="Orthopedics",
+        common_icd10=["M23.21", "S83.20XA"],
+    ),
+    BasicCPTCode(
+        code="49505",
+        description="Repair initial inguinal hernia, age 5 or older",
+        min_cost=800.00,
+        max_cost=1800.00,
+        specialty="General Surgery",
+        common_icd10=["K40.90", "K40.91"],
+    ),
+    # Pre-operative evaluation
+    BasicCPTCode(
+        code="99205",
+        description="Office visit, new patient, level 5 (pre-op evaluation)",
+        min_cost=200.00,
+        max_cost=350.00,
+        specialty="Primary Care",
+        common_icd10=["Z01.818", "M17.11", "K80.20"],
+    ),
 ]
 
 
@@ -162,6 +204,35 @@ BASIC_ICD10_CODES = [
         description="Fever, unspecified",
         category="Symptoms",
         common_cpt=["99213", "85025"],
+    ),
+    # Surgical diagnoses
+    BasicICD10Code(
+        code="M1711",
+        formatted_code="M17.11",
+        description="Primary osteoarthritis, right knee",
+        category="Musculoskeletal",
+        common_cpt=["27447", "99205", "99214"],
+    ),
+    BasicICD10Code(
+        code="K8020",
+        formatted_code="K80.20",
+        description="Calculus of gallbladder without obstruction",
+        category="Digestive",
+        common_cpt=["47562", "99205", "99214"],
+    ),
+    BasicICD10Code(
+        code="M2321",
+        formatted_code="M23.21",
+        description="Derangement of anterior horn of medial meniscus, right knee",
+        category="Musculoskeletal",
+        common_cpt=["29881", "99205", "99214"],
+    ),
+    BasicICD10Code(
+        code="K4090",
+        formatted_code="K40.90",
+        description="Unilateral inguinal hernia without obstruction or gangrene",
+        category="Digestive",
+        common_cpt=["49505", "99205", "99214"],
     ),
 ]
 
