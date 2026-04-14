@@ -183,6 +183,120 @@ class TestGenerate:
                 )
             break  # only need to verify one group
 
+    def test_patient_reuse_shares_mrn_and_demographics(self, tmp_path):
+        """Returning patients share the same MRN, name, and DoB across HAR groups."""
+        import csv
+
+        output_dir = tmp_path / "output"
+        # Large enough sample with a seed that triggers reuse
+        generate(count=500, output_dir=output_dir, seed=42)
+
+        # Read OpenAR CSV (skip 9 header rows + 1 column header row)
+        ar_path = output_dir / "openar.csv"
+        with open(ar_path) as f:
+            reader = csv.reader(f)
+            rows = list(reader)
+        # Header rows: 9 metadata + 1 column header
+        col_headers = rows[9]
+        mrn_idx = col_headers.index("MRN")
+        har_idx = col_headers.index("Hospital Account ID")
+        data_rows = rows[10:]
+
+        # Group rows by MRN
+        by_mrn: dict[str, set[str]] = {}
+        for row in data_rows:
+            mrn = row[mrn_idx]
+            har = row[har_idx]
+            by_mrn.setdefault(mrn, set()).add(har)
+
+        # Some MRNs should appear with multiple distinct HAR IDs (returning patients)
+        multi_har_mrns = {mrn: hars for mrn, hars in by_mrn.items() if len(hars) > 1}
+        assert len(multi_har_mrns) > 0, (
+            "Expected some patients (MRNs) with multiple HAR groups"
+        )
+
+        # Also verify that claims for the same MRN share patient demographics
+        claims = [json.loads(line) for line in _read_all_jsonl(output_dir, "837_claims")]
+
+        # Build mapping: PCN → patient demographics
+        pcn_to_patient = {}
+        for c in claims:
+            pcn_to_patient[c["patientControlNumber"]] = c["patient"]["person"]
+
+        # Read AR rows and group PCNs by MRN
+        pcns_by_mrn: dict[str, list[str]] = {}
+        invoice_idx = col_headers.index("Invoice Number")
+        for row in data_rows:
+            mrn = row[mrn_idx]
+            pcn = row[invoice_idx]
+            pcns_by_mrn.setdefault(mrn, []).append(pcn)
+
+        # For MRNs with multiple HARs, verify all PCNs share the same patient name/DoB
+        for mrn in multi_har_mrns:
+            pcns = set(pcns_by_mrn[mrn])
+            patients = [pcn_to_patient[pcn] for pcn in pcns if pcn in pcn_to_patient]
+            if len(patients) < 2:
+                continue
+            first = patients[0]
+            for p in patients[1:]:
+                assert p["firstName"] == first["firstName"]
+                assert p["lastNameOrOrgName"] == first["lastNameOrOrgName"]
+                assert p["birthDate"] == first["birthDate"]
+
+    def test_encounter_sequences_produce_coordinated_claims(self, tmp_path):
+        """Encounter sequences produce claims with shared patient and
+        related diagnoses across visits (e.g. consult → surgery → follow-up)."""
+        output_dir = tmp_path / "output"
+        # Use a large-ish count so encounter sequences are likely to trigger.
+        generate(count=1000, output_dir=output_dir, seed=7)
+
+        claims = [json.loads(line) for line in _read_all_jsonl(output_dir, "837_claims")]
+
+        # Group claims by (patient first name, last name, DoB) to find
+        # patients with multiple visits.
+        by_patient: dict[tuple, list[dict]] = {}
+        for c in claims:
+            p = c["patient"]["person"]
+            key = (p["firstName"], p["lastNameOrOrgName"], p["birthDate"])
+            by_patient.setdefault(key, []).append(c)
+
+        multi_visit = {k: v for k, v in by_patient.items() if len(v) > 1}
+        assert len(multi_visit) > 0, "Expected some patients with multiple visits"
+
+        # Look for a surgical sequence: claims for the same patient where one
+        # service line has a surgical CPT code (27447, 47562, 29881, 49505)
+        surgical_cpts = {"27447", "47562", "29881", "49505"}
+        found_surgery_sequence = False
+        for _key, patient_claims in multi_visit.items():
+            cpts_across_visits: list[set[str]] = []
+            for c in patient_claims:
+                visit_cpts = set()
+                for sl in c.get("serviceLines", []):
+                    proc = sl.get("procedure", {})
+                    visit_cpts.add(proc.get("code", ""))
+                cpts_across_visits.append(visit_cpts)
+
+            has_surgery = any(
+                cpts & surgical_cpts for cpts in cpts_across_visits
+            )
+            has_office_visit = any(
+                cpts & {"99213", "99204", "99205", "99214"}
+                for cpts in cpts_across_visits
+            )
+            if has_surgery and has_office_visit:
+                found_surgery_sequence = True
+                # Verify the surgery and office visit are on different dates
+                dates = {c["serviceDateFrom"] for c in patient_claims}
+                assert len(dates) > 1, (
+                    "Surgery sequence should have different service dates"
+                )
+                break
+
+        assert found_surgery_sequence, (
+            "Expected at least one surgery pathway "
+            "(consult + surgery for the same patient)"
+        )
+
     def test_no_splitting_with_zero(self, tmp_path):
         """claims_per_file=0 produces single unsuffixed file."""
         output_dir = tmp_path / "output"
