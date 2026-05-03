@@ -4,6 +4,7 @@ Generate realistic 837P (Professional) claims.
 
 # ruff: noqa: S311 # insecure random numbers are fine here
 import random
+import string
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -38,12 +39,176 @@ from .helpers import (
     random_float,
 )
 from .reference_data import (
+    CITIES_STATES,
     COMMON_PAYERS,
+    FIRST_NAMES,
+    LAST_NAMES,
     PLACE_OF_SERVICE,
     Gender,
     Payer,
     PlaceOfService,
 )
+
+
+RENDERING_PROVIDER_TAXONOMIES = [
+    # Primary Care
+    ("207Q00000X", "Family Medicine Physician"),
+    ("207QA0505X", "Adult Medicine"),
+    ("207QA0000X", "Adolescent Medicine"),
+    ("207QG0300X", "Geriatric Medicine"),
+    ("207QS0010X", "Sports Medicine"),
+    ("207R00000X", "Internal Medicine Physician"),
+    ("208D00000X", "General Practice Physician"),
+    ("208000000X", "Pediatrics Physician"),
+    ("2080P0006X", "Developmental-Behavioral Pediatrics"),
+    ("2080N0001X", "Neonatal-Perinatal Medicine"),
+    # Surgery
+    ("208600000X", "Surgery Physician"),
+    ("2086S0120X", "Pediatric Surgery"),
+    ("2086S0105X", "Surgery of the Hand"),
+    ("2086S0122X", "Plastic and Reconstructive Surgery"),
+    ("2086X0206X", "Surgical Oncology"),
+    ("207X00000X", "Orthopaedic Surgery Physician"),
+    ("207XS0114X", "Adult Reconstructive Orthopaedic Surgery"),
+    ("207XS0106X", "Orthopaedic Hand Surgery"),
+    ("207XX0004X", "Orthopaedic Foot and Ankle Surgery"),
+    ("207XX0801X", "Orthopaedic Sports Medicine"),
+    ("208C00000X", "Colon and Rectal Surgery"),
+    ("204C00000X", "Neurological Surgery"),
+    ("208200000X", "Plastic Surgery"),
+    ("208G00000X", "Thoracic Surgery"),
+    ("207T00000X", "Neurological Surgery Physician"),
+    # Cardiovascular
+    ("207RC0000X", "Cardiovascular Disease Physician"),
+    ("207RI0011X", "Interventional Cardiology"),
+    ("207RC0200X", "Critical Care Medicine (Internal Medicine)"),
+    ("207RC0001X", "Clinical Cardiac Electrophysiology"),
+    # Gastroenterology
+    ("207RG0100X", "Gastroenterology Physician"),
+    ("207RG0300X", "Hepatology Physician"),
+    # Pulmonology
+    ("207RP1001X", "Pulmonary Disease Physician"),
+    ("207RT0003X", "Pulmonary Critical Care"),
+    # Neurology & Psychiatry
+    ("2084N0400X", "Neurology Physician"),
+    ("2084N0402X", "Neuromuscular Medicine"),
+    ("2084P0802X", "Addiction Psychiatry"),
+    ("2084P0800X", "Psychiatry Physician"),
+    ("2084P0804X", "Child and Adolescent Psychiatry"),
+    ("2084F0202X", "Forensic Psychiatry"),
+    ("2084P0805X", "Geriatric Psychiatry"),
+    ("2084B0002X", "Obesity Medicine (Psychiatry)"),
+    # Radiology
+    ("2085R0202X", "Diagnostic Radiology Physician"),
+    ("2085R0001X", "Radiation Oncology"),
+    ("2085U0001X", "Diagnostic Ultrasound"),
+    ("2085N0700X", "Neuroradiology"),
+    ("2085R0204X", "Vascular and Interventional Radiology"),
+    # OB/GYN
+    ("207V00000X", "Obstetrics & Gynecology Physician"),
+    ("207VX0201X", "Gynecologic Oncology"),
+    ("207VG0400X", "Gynecology Physician"),
+    ("207VM0101X", "Maternal and Fetal Medicine"),
+    ("207VX0000X", "Obstetrics Physician"),
+    ("207VE0102X", "Reproductive Endocrinology"),
+    # ENT
+    ("207Y00000X", "Otolaryngology Physician"),
+    ("207YX0602X", "Otolaryngic Allergy"),
+    ("207YS0123X", "Facial Plastic Surgery"),
+    # Endocrinology & Metabolism
+    ("207RE0101X", "Endocrinology Physician"),
+    ("207RD0900X", "Diabetes & Metabolism"),
+    # Hematology & Oncology
+    ("207RH0003X", "Hematology & Oncology Physician"),
+    ("207RH0000X", "Hematology Physician"),
+    ("207RX0202X", "Medical Oncology"),
+    # Nephrology
+    ("207RN0300X", "Nephrology Physician"),
+    # Rheumatology
+    ("207RR0500X", "Rheumatology Physician"),
+    # Infectious Disease
+    ("207RI0200X", "Infectious Disease Physician"),
+    # Allergy & Immunology
+    ("207K00000X", "Allergy & Immunology Physician"),
+    ("207KA0200X", "Allergy Physician"),
+    ("207KI0005X", "Clinical & Laboratory Immunology"),
+    # Dermatology
+    ("207N00000X", "Dermatology Physician"),
+    ("207NI0002X", "Clinical & Laboratory Dermatological Immunology"),
+    ("207ND0101X", "MOHS-Micrographic Surgery"),
+    ("207NP0225X", "Pediatric Dermatology"),
+    ("207NS0135X", "Procedural Dermatology"),
+    # Ophthalmology
+    ("207W00000X", "Ophthalmology Physician"),
+    ("207WX0200X", "Ophthalmic Plastic and Reconstructive Surgery"),
+    ("207WX0009X", "Glaucoma Specialist"),
+    ("207WX0107X", "Retina Specialist"),
+    # Urology
+    ("208800000X", "Urology Physician"),
+    ("2088P0231X", "Pediatric Urology"),
+    ("2088F0040X", "Female Pelvic Medicine and Reconstructive Surgery"),
+    # Anesthesiology
+    ("207L00000X", "Anesthesiology Physician"),
+    ("207LA0401X", "Addiction Medicine (Anesthesiology)"),
+    ("207LC0200X", "Critical Care Medicine (Anesthesiology)"),
+    ("207LP2900X", "Pain Medicine"),
+    # Emergency Medicine
+    ("207P00000X", "Emergency Medicine Physician"),
+    ("207PE0004X", "Emergency Medical Services"),
+    ("207PS0010X", "Sports Medicine (Emergency Medicine)"),
+    ("207PT0002X", "Medical Toxicology (Emergency Medicine)"),
+    # Pathology
+    ("207ZP0101X", "Anatomic Pathology"),
+    ("207ZP0102X", "Anatomic Pathology & Clinical Pathology"),
+    ("207ZP0104X", "Chemical Pathology"),
+    ("207ZP0105X", "Clinical Pathology/Laboratory Medicine"),
+    ("207ZD0900X", "Dermatopathology"),
+    # Physical Medicine & Rehabilitation
+    ("208100000X", "Physical Medicine & Rehabilitation"),
+    ("2081P2900X", "Pain Medicine (PM&R)"),
+    ("2081P0010X", "Pediatric Rehabilitation Medicine"),
+    ("2081S0010X", "Sports Medicine (PM&R)"),
+    # Preventive Medicine
+    ("2083P0500X", "Preventive Medicine/Occupational-Environmental Medicine"),
+    ("2083P0901X", "Public Health & General Preventive Medicine"),
+    ("2083X0100X", "Occupational Medicine"),
+    # Nuclear Medicine
+    ("207U00000X", "Nuclear Medicine Physician"),
+    ("207UN0903X", "In Vivo & In Vitro Nuclear Medicine"),
+    ("207UN0901X", "Nuclear Cardiology"),
+    # Non-Physician Clinicians
+    ("363L00000X", "Nurse Practitioner"),
+    ("363LA2200X", "Adult Health Nurse Practitioner"),
+    ("363LF0000X", "Family Nurse Practitioner"),
+    ("363LP0200X", "Pediatric Nurse Practitioner"),
+    ("363LP0808X", "Psych/Mental Health Nurse Practitioner"),
+    ("363LW0102X", "Women's Health Nurse Practitioner"),
+    ("363LC1500X", "Community Health Nurse Practitioner"),
+    ("363A00000X", "Physician Assistant"),
+    ("363AM0700X", "Medical Physician Assistant"),
+    ("363AS0400X", "Surgical Physician Assistant"),
+    ("364S00000X", "Clinical Nurse Specialist"),
+    ("367A00000X", "Advanced Practice Midwife"),
+    ("367500000X", "Certified Registered Nurse Anesthetist"),
+    # Therapy & Rehab
+    ("225100000X", "Physical Therapist"),
+    ("225200000X", "Physical Therapy Assistant"),
+    ("225500000X", "Respiratory Therapist"),
+    ("225600000X", "Dance Therapist"),
+    ("221700000X", "Art Therapist"),
+    ("225X00000X", "Occupational Therapist"),
+    # Behavioral Health
+    ("101Y00000X", "Counselor"),
+    ("101YA0400X", "Addiction Counselor"),
+    ("101YM0800X", "Mental Health Counselor"),
+    ("101YP2500X", "Professional Counselor"),
+    ("102L00000X", "Psychoanalyst"),
+    ("103T00000X", "Psychologist"),
+    ("103TA0400X", "Addiction Psychologist"),
+    ("103TC0700X", "Clinical Psychologist"),
+    ("104100000X", "Social Worker"),
+    ("1041C0700X", "Clinical Social Worker"),
+]
 
 
 @dataclass
@@ -71,6 +236,7 @@ class PatientContext:
     group_or_policy_number: str
     payer_info: Payer
     billing_provider: Provider
+    rendering_provider: Provider
     base_service_date: date
     mrn: str | None = None
     pos: PlaceOfService = field(default_factory=lambda: random.choice(PLACE_OF_SERVICE))
@@ -139,6 +305,7 @@ class ClaimGenerator:
             group_or_policy_number=generate_member_id()[:10],
             payer_info=payer_info,
             billing_provider=self._generate_billing_provider(),
+            rendering_provider=self._generate_rendering_provider(),
             base_service_date=service_date
             or generate_service_date(days_ago_min=1, days_ago_max=90),
         )
@@ -267,7 +434,7 @@ class ClaimGenerator:
             release_of_information_code="Y",
             medical_record_number=ctx.mrn,
             billing_provider=ctx.billing_provider,
-            providers=[self._generate_rendering_provider()],
+            providers=[ctx.rendering_provider],
             diags=diags,
             service_lines=service_lines,
             transaction=self._generate_transaction(pcn),
@@ -398,27 +565,60 @@ class ClaimGenerator:
             tax_id=generate_tax_id(),
             last_name_or_org_name=name,
             address=generate_address(),
-            provider_taxonomy=Code(
-                sub_type="PROVIDER_TAXONOMY",
-                code="207Q00000X",
-                desc="Family Medicine Physician",
-            ),
         )
 
-    def _generate_rendering_provider(self) -> Provider:
-        """Generate rendering provider information."""
-        first, last, middle = generate_person_name("UNKNOWN")
+    @staticmethod
+    def _generate_rendering_provider() -> Provider:
+        """Generate rendering provider information.
+
+        All attributes are derived deterministically from the NPI so that the
+        same NPI always produces the same name, address, and taxonomy — across
+        calls and across process runs — without any external cache.
+        """
+        npi = generate_npi()
+        rng = random.Random(npi)
+
+        first = rng.choice(FIRST_NAMES["UNKNOWN"])
+        last = rng.choice(LAST_NAMES)
+        middle = rng.choice(string.ascii_uppercase)
+        tax_code, tax_desc = rng.choice(RENDERING_PROVIDER_TAXONOMIES)
+
+        city_state = rng.choice(CITIES_STATES)
+        street_number = rng.randint(100, 9999)
+        street_name = rng.choice([
+            "MAIN ST", "OAK AVE", "MAPLE DR", "PARK BLVD", "WASHINGTON ST",
+            "LINCOLN AVE", "LAKE DR", "HILL RD", "CHURCH ST", "SCHOOL ST",
+        ])
+        line2 = None
+        if rng.random() < 0.3:
+            if rng.random() < 0.5:
+                line2 = f"APT {rng.randint(1, 999)}"
+            else:
+                line2 = f"SUITE {rng.randint(100, 999)}"
+        zip_code = city_state.zip
+        if rng.random() < 0.7:
+            zip_code += str(rng.randint(1000, 9999))
 
         return Provider(
             entity_role="RENDERING",
             entity_type="INDIVIDUAL",
             identification_type="NPI",
-            identifier=generate_npi(),
+            identifier=npi,
             last_name_or_org_name=last,
             first_name=first,
             middle_name=middle,
-            address=generate_address(),
-            provider_taxonomy=None,
+            address=Address(
+                line=f"{street_number} {street_name}",
+                line2=line2,
+                city=city_state.city,
+                state_code=city_state.state,
+                zip_code=zip_code,
+            ),
+            provider_taxonomy=Code(
+                sub_type="PROVIDER_TAXONOMY",
+                code=tax_code,
+                desc=tax_desc,
+            ),
         )
 
     def _generate_transaction(self, pcn: str) -> Transaction837:
