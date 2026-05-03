@@ -49,7 +49,6 @@ from .reference_data import (
     PlaceOfService,
 )
 
-
 RENDERING_PROVIDER_TAXONOMIES = [
     # Primary Care
     ("207Q00000X", "Family Medicine Physician"),
@@ -585,10 +584,20 @@ class ClaimGenerator:
 
         city_state = rng.choice(CITIES_STATES)
         street_number = rng.randint(100, 9999)
-        street_name = rng.choice([
-            "MAIN ST", "OAK AVE", "MAPLE DR", "PARK BLVD", "WASHINGTON ST",
-            "LINCOLN AVE", "LAKE DR", "HILL RD", "CHURCH ST", "SCHOOL ST",
-        ])
+        street_name = rng.choice(
+            [
+                "MAIN ST",
+                "OAK AVE",
+                "MAPLE DR",
+                "PARK BLVD",
+                "WASHINGTON ST",
+                "LINCOLN AVE",
+                "LAKE DR",
+                "HILL RD",
+                "CHURCH ST",
+                "SCHOOL ST",
+            ]
+        )
         line2 = None
         if rng.random() < 0.3:
             if rng.random() < 0.5:
