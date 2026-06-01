@@ -25,7 +25,13 @@ from synthetic_edi_gen.edi_models import (
     Transaction837,
 )
 
-from .basic_codes import BASIC_CPT_CODES, BASIC_ICD10_CODES, BASIC_MODIFIERS
+from .basic_codes import (
+    BASIC_CPT_CODES,
+    BASIC_HCPCS_DRUG_CODES,
+    BASIC_ICD10_CODES,
+    BASIC_MODIFIERS,
+    BasicHCPCSDrugCode,
+)
 from .helpers import (
     generate_address,
     generate_birth_date,
@@ -48,6 +54,10 @@ from .reference_data import (
     Payer,
     PlaceOfService,
 )
+
+# Fraction of (non-forced) service lines that bill an administered drug, where
+# the line carries a HCPCS J-code procedure plus the drug's NDC information.
+DRUG_LINE_PROBABILITY = 0.12
 
 RENDERING_PROVIDER_TAXONOMIES = [
     # Primary Care
@@ -453,7 +463,16 @@ class ClaimGenerator:
         service_date: date,
         forced_cpt: str | None = None,
     ) -> ProfLine:
-        """Generate a single service line."""
+        """Generate a single service line.
+
+        Most lines bill a CPT procedure, but a minority bill a clinician-
+        administered drug: a HCPCS J-code procedure carrying the drug's NDC,
+        quantity, and unit of measure (see ``_generate_drug_service_line``).
+        """
+        drug_data = self._select_drug_for_line(forced_cpt)
+        if drug_data is not None:
+            return self._generate_drug_service_line(line_num, service_date, drug_data)
+
         # Select a CPT code
         if forced_cpt:
             matches = [c for c in BASIC_CPT_CODES if c.code == forced_cpt]
@@ -501,6 +520,66 @@ class ClaimGenerator:
                 desc=cpt_data.description,
                 modifiers=modifiers,
             ),
+            diag_pointers=diag_pointers,
+        )
+
+    @staticmethod
+    def _select_drug_for_line(forced_cpt: str | None) -> BasicHCPCSDrugCode | None:
+        """Decide whether a line bills an administered drug, and which one.
+
+        When a procedure code is forced, a drug line is produced only if that
+        code is a known HCPCS drug code (so callers can request drug lines
+        explicitly). Otherwise a drug line is chosen at random a fraction of
+        the time.
+        """
+        if forced_cpt is not None:
+            return next(
+                (d for d in BASIC_HCPCS_DRUG_CODES if d.hcpcs_code == forced_cpt),
+                None,
+            )
+        if random.random() < DRUG_LINE_PROBABILITY:
+            return random.choice(BASIC_HCPCS_DRUG_CODES)
+        return None
+
+    @staticmethod
+    def _generate_drug_service_line(
+        line_num: int,
+        service_date: date,
+        drug_data: BasicHCPCSDrugCode,
+    ) -> ProfLine:
+        """Generate a service line that bills a clinician-administered drug.
+
+        The procedure is the drug's HCPCS J-code and the line additionally
+        reports the National Drug Code (NDC). The NDC quantity is derived from
+        the billed unit count and the J-code's per-unit dosing so the reported
+        drug quantity stays consistent with the procedure and units.
+        """
+        units = random.randint(1, drug_data.max_units) if drug_data.max_units > 1 else 1
+
+        charge = random_float(drug_data.min_cost, drug_data.max_cost) * units
+        drug_quantity = round(units * drug_data.ndc_qty_per_unit, 3)
+
+        num_diags = random.randint(1, min(3, len(drug_data.common_icd10)))
+        diag_pointers = list(range(1, num_diags + 1))
+
+        return ProfLine(
+            source_line_id=f"LINE{line_num}",
+            charge_amount=float(round(charge, 2)),
+            service_date_from=service_date,
+            unit_type="UNIT",
+            unit_count=float(units),
+            procedure=Procedure(
+                sub_type="HCPCS",
+                code=drug_data.hcpcs_code,
+                desc=drug_data.description,
+            ),
+            drug=Code(
+                sub_type="NDC",
+                code=drug_data.ndc,
+                desc=drug_data.drug_name,
+            ),
+            drug_quantity=drug_quantity,
+            drug_unit_type=drug_data.ndc_unit,
             diag_pointers=diag_pointers,
         )
 
