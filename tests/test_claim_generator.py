@@ -5,7 +5,7 @@ from datetime import date
 
 import pytest
 
-from synthetic_edi_gen.basic_codes import BASIC_CPT_CODES
+from synthetic_edi_gen.basic_codes import BASIC_CPT_CODES, BASIC_HCPCS_DRUG_CODES
 from synthetic_edi_gen.claim_generator import ClaimGenerator
 
 
@@ -80,12 +80,16 @@ class TestGenerateClaim:
         assert abs(claim.charge_amount - line_total) < 0.01
 
     def test_service_line_has_procedure(self, sample_claim):
+        cpt_codes = {c.code for c in BASIC_CPT_CODES}
+        drug_codes = {d.hcpcs_code for d in BASIC_HCPCS_DRUG_CODES}
         for line in sample_claim.service_lines:
             assert line.procedure is not None
             assert line.procedure.code
-            assert line.procedure.sub_type == "CPT"
-            valid_codes = {c.code for c in BASIC_CPT_CODES}
-            assert line.procedure.code in valid_codes
+            if line.procedure.sub_type == "CPT":
+                assert line.procedure.code in cpt_codes
+            else:
+                assert line.procedure.sub_type == "HCPCS"
+                assert line.procedure.code in drug_codes
 
     def test_diagnoses_cover_all_pointers(self, sample_claim):
         claim = sample_claim
@@ -180,3 +184,60 @@ class TestMultiPcnContext:
 
         assert c1.service_date_from == d1
         assert c2.service_date_from == d2
+
+
+class TestDrugServiceLines:
+    def _drug_lines(self, generator, attempts=300):
+        """Collect every drug service line across many generated claims."""
+        lines = []
+        for _ in range(attempts):
+            claim = generator.generate_claim()
+            lines.extend(line for line in claim.service_lines if line.drug)
+        return lines
+
+    def test_drug_lines_are_generated(self, claim_generator):
+        assert self._drug_lines(claim_generator), (
+            "expected at least some service lines to bill an administered drug"
+        )
+
+    def test_drug_line_fields_are_correlated(self, claim_generator):
+        by_hcpcs = {d.hcpcs_code: d for d in BASIC_HCPCS_DRUG_CODES}
+        for line in self._drug_lines(claim_generator):
+            # The procedure is the drug's HCPCS J-code, not a CPT code.
+            assert line.procedure is not None
+            assert line.procedure.sub_type == "HCPCS"
+            drug_data = by_hcpcs.get(line.procedure.code)
+            assert drug_data is not None, "drug line uses an unknown HCPCS code"
+
+            # The NDC identifies the product the J-code administers.
+            assert line.drug is not None
+            assert line.drug.sub_type == "NDC"
+            assert line.drug.code == drug_data.ndc
+            assert line.drug.desc == drug_data.drug_name
+
+            # Quantity and unit of measure stay consistent with the procedure.
+            assert line.drug_unit_type == drug_data.ndc_unit
+            expected_qty = round(line.unit_count * drug_data.ndc_qty_per_unit, 3)
+            assert line.drug_quantity == expected_qty
+            assert line.drug_quantity > 0
+
+    def test_non_drug_lines_have_no_ndc(self, claim_generator):
+        for _ in range(50):
+            claim = claim_generator.generate_claim()
+            for line in claim.service_lines:
+                if line.procedure and line.procedure.sub_type == "CPT":
+                    assert line.drug is None
+                    assert line.drug_quantity is None
+                    assert line.drug_unit_type is None
+
+    def test_forced_drug_hcpcs_code_yields_ndc_line(self, claim_generator):
+        drug = BASIC_HCPCS_DRUG_CODES[0]
+        claim = claim_generator.generate_claim(forced_cpt_codes=[drug.hcpcs_code])
+
+        assert len(claim.service_lines) == 1
+        line = claim.service_lines[0]
+        assert line.procedure.code == drug.hcpcs_code
+        assert line.procedure.sub_type == "HCPCS"
+        assert line.drug is not None
+        assert line.drug.code == drug.ndc
+        assert line.drug_unit_type == drug.ndc_unit

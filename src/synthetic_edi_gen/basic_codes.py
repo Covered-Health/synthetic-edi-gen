@@ -138,6 +138,172 @@ BASIC_CPT_CODES = [
 ]
 
 
+class BasicHCPCSDrugCode(BaseModel):
+    """A HCPCS drug-administration code (J-code) paired with the NDC of a
+    representative product.
+
+    When an 837P service line bills for an administered drug, the procedure is
+    a HCPCS J-code (SV101) and the drug is additionally identified by its
+    National Drug Code (LIN03) with a quantity (CTP04) and unit of measure
+    (CTP05-1). The NDC must identify the actual product the J-code administers,
+    so these fields are kept together to guarantee that correlation.
+    """
+
+    hcpcs_code: str
+    """HCPCS Level II procedure code billed on the line (SV101)."""
+    description: str
+    """Long description of the HCPCS code, including its billing dosage."""
+    ndc: str
+    """National Drug Code of a representative product, as the 11-digit (5-4-2)
+    string sent in LIN03 under the N4 qualifier (no hyphens)."""
+    drug_name: str
+    """Human-readable product name/strength for the NDC."""
+    ndc_unit: Literal["F2", "GR", "ME", "ML", "UN"]
+    """NDC unit of measure (CTP05-1): International Unit, Gram, Milligram,
+    Milliliter, or Unit."""
+    ndc_qty_per_unit: float
+    """National drug units (in ``ndc_unit``) dispensed per one billed HCPCS
+    unit. The line's CTP04 quantity is this value times the SV104 unit count,
+    keeping the reported NDC quantity consistent with the procedure."""
+    min_cost: float
+    """Minimum charge per billed HCPCS unit."""
+    max_cost: float
+    """Maximum charge per billed HCPCS unit."""
+    max_units: int
+    """Maximum number of HCPCS units plausibly administered in one encounter."""
+    common_icd10: list[str]
+    """Diagnoses commonly treated with this drug."""
+
+
+# Common HCPCS J-codes for clinician-administered drugs, each paired with the
+# NDC of a representative (non-controlled) product. The per-unit dosing of the
+# J-code and the strength of the NDC product determine ``ndc_qty_per_unit`` so
+# the reported drug quantity always reconciles with the billed units.
+BASIC_HCPCS_DRUG_CODES = [
+    BasicHCPCSDrugCode(
+        hcpcs_code="J1885",
+        description="Injection, ketorolac tromethamine, per 15 mg",
+        ndc="00409379601",
+        drug_name="Ketorolac tromethamine 30 mg/mL injection",
+        ndc_unit="ML",
+        ndc_qty_per_unit=0.5,  # 15 mg / (30 mg/mL)
+        min_cost=1.50,
+        max_cost=4.00,
+        max_units=4,
+        common_icd10=["M54.9", "M25.561", "M79.3"],
+    ),
+    BasicHCPCSDrugCode(
+        hcpcs_code="J3301",
+        description="Injection, triamcinolone acetonide, not otherwise "
+        "specified, per 10 mg",
+        ndc="00003029320",
+        drug_name="Kenalog-40 (triamcinolone acetonide) 40 mg/mL injection",
+        ndc_unit="ML",
+        ndc_qty_per_unit=0.25,  # 10 mg / (40 mg/mL)
+        min_cost=2.00,
+        max_cost=6.00,
+        max_units=4,
+        common_icd10=["M17.11", "M54.9", "M25.561"],
+    ),
+    BasicHCPCSDrugCode(
+        hcpcs_code="J1040",
+        description="Injection, methylprednisolone acetate, 80 mg",
+        ndc="00009030602",
+        drug_name="Depo-Medrol (methylprednisolone acetate) 80 mg/mL injection",
+        ndc_unit="ML",
+        ndc_qty_per_unit=1.0,  # 80 mg / (80 mg/mL)
+        min_cost=8.00,
+        max_cost=18.00,
+        max_units=2,
+        common_icd10=["M54.9", "M17.11", "J45.909"],
+    ),
+    BasicHCPCSDrugCode(
+        hcpcs_code="J1100",
+        description="Injection, dexamethasone sodium phosphate, 1 mg",
+        ndc="00641614525",
+        drug_name="Dexamethasone sodium phosphate 4 mg/mL injection",
+        ndc_unit="ML",
+        ndc_qty_per_unit=0.25,  # 1 mg / (4 mg/mL)
+        min_cost=0.50,
+        max_cost=2.00,
+        max_units=16,
+        common_icd10=["J45.909", "M54.9", "R05"],
+    ),
+    BasicHCPCSDrugCode(
+        hcpcs_code="J2550",
+        description="Injection, promethazine HCl, up to 50 mg",
+        ndc="00641608825",
+        drug_name="Promethazine HCl 25 mg/mL injection",
+        ndc_unit="ML",
+        ndc_qty_per_unit=2.0,  # 50 mg / (25 mg/mL)
+        min_cost=1.00,
+        max_cost=3.00,
+        max_units=1,
+        common_icd10=["R11.2", "R11.10", "G43.909"],
+    ),
+    BasicHCPCSDrugCode(
+        hcpcs_code="J1200",
+        description="Injection, diphenhydramine HCl, up to 50 mg",
+        ndc="00409208501",
+        drug_name="Diphenhydramine HCl 50 mg/mL injection",
+        ndc_unit="ML",
+        ndc_qty_per_unit=1.0,  # 50 mg / (50 mg/mL)
+        min_cost=0.50,
+        max_cost=2.00,
+        max_units=1,
+        common_icd10=["T78.40XA", "L50.9", "J30.9"],
+    ),
+    BasicHCPCSDrugCode(
+        hcpcs_code="J0171",
+        description="Injection, adrenalin, epinephrine, 0.1 mg",
+        ndc="42023015901",
+        drug_name="Adrenalin (epinephrine) 1 mg/mL injection",
+        ndc_unit="ML",
+        ndc_qty_per_unit=0.1,  # 0.1 mg / (1 mg/mL)
+        min_cost=0.50,
+        max_cost=2.00,
+        max_units=5,
+        common_icd10=["T78.2XXA", "T78.40XA", "J45.901"],
+    ),
+    BasicHCPCSDrugCode(
+        hcpcs_code="J3420",
+        description="Injection, vitamin B-12 cyanocobalamin, up to 1000 mcg",
+        ndc="00517023125",
+        drug_name="Cyanocobalamin 1000 mcg/mL injection",
+        ndc_unit="ML",
+        ndc_qty_per_unit=1.0,  # 1000 mcg / (1000 mcg/mL)
+        min_cost=0.50,
+        max_cost=2.00,
+        max_units=1,
+        common_icd10=["D51.0", "E53.8", "D51.9"],
+    ),
+    BasicHCPCSDrugCode(
+        hcpcs_code="J0696",
+        description="Injection, ceftriaxone sodium, per 250 mg",
+        ndc="00409733701",
+        drug_name="Ceftriaxone sodium 1 g single-dose vial",
+        ndc_unit="GR",
+        ndc_qty_per_unit=0.25,  # 250 mg = 0.25 g
+        min_cost=1.00,
+        max_cost=4.00,
+        max_units=8,
+        common_icd10=["J06.9", "N39.0", "J18.9"],
+    ),
+    BasicHCPCSDrugCode(
+        hcpcs_code="J0585",
+        description="Injection, onabotulinumtoxinA, 1 unit",
+        ndc="00023114501",
+        drug_name="Botox (onabotulinumtoxinA) 100 unit single-dose vial",
+        ndc_unit="UN",
+        ndc_qty_per_unit=1.0,  # 1 billed unit = 1 NDC unit
+        min_cost=5.00,
+        max_cost=7.00,
+        max_units=100,
+        common_icd10=["G24.5", "G43.909", "G24.3"],
+    ),
+]
+
+
 class BasicICD10Code(BaseModel):
     code: str
     formatted_code: str
