@@ -1,6 +1,6 @@
 [project]
 name = "synthetic-edi-gen"
-version = "0.3.2"
+version = "0.3.3"
 description = "Generate synthetic EDI 835/837 healthcare data for testing and demos"
 readme = "README.md"
 requires-python = ">=3.12"

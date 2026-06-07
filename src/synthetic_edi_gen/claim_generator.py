@@ -56,7 +56,7 @@ from .reference_data import (
 )
 
 # Fraction of (non-forced) service lines that bill an administered drug, where
-# the line carries a HCPCS J-code procedure plus the drug's NDC information.
+# the line carries a HCPCS J/Q-code procedure plus the drug's NDC information.
 DRUG_LINE_PROBABILITY = 0.12
 
 RENDERING_PROVIDER_TAXONOMIES = [
@@ -254,11 +254,19 @@ class PatientContext:
 class ClaimGenerator:
     """Generator for 837P professional claims."""
 
-    def __init__(self, seed: int | None = None):
-        """Initialize the generator with optional seed for reproducibility."""
+    def __init__(self, seed: int | None = None, drug_defect_rate: float = 0.0):
+        """Initialize the generator with optional seed for reproducibility.
+
+        Args:
+            seed: Random seed for reproducible output.
+            drug_defect_rate: Fraction of drug service lines that carry a
+                defect (missing NDC or quantity mismatch). Defaults to 0 so
+                callers that don't need defects are unaffected.
+        """
         if seed is not None:
             random.seed(seed)
         self.generated_pcns: set[str] = set()
+        self._drug_defect_rate = drug_defect_rate
 
     def generate_patient_context(
         self,
@@ -466,12 +474,15 @@ class ClaimGenerator:
         """Generate a single service line.
 
         Most lines bill a CPT procedure, but a minority bill a clinician-
-        administered drug: a HCPCS J-code procedure carrying the drug's NDC,
+        administered drug: a HCPCS J/Q-code procedure carrying the drug's NDC,
         quantity, and unit of measure (see ``_generate_drug_service_line``).
         """
         drug_data = self._select_drug_for_line(forced_cpt)
         if drug_data is not None:
-            return self._generate_drug_service_line(line_num, service_date, drug_data)
+            line = self._generate_drug_service_line(line_num, service_date, drug_data)
+            if self._drug_defect_rate > 0 and random.random() < self._drug_defect_rate:
+                self._apply_drug_defect(line)
+            return line
 
         # Select a CPT code
         if forced_cpt:
@@ -582,6 +593,24 @@ class ClaimGenerator:
             drug_unit_type=drug_data.ndc_unit,
             diag_pointers=diag_pointers,
         )
+
+    @staticmethod
+    def _apply_drug_defect(line: ProfLine) -> None:
+        """Mutate a drug service line to introduce a defect.
+
+        Half the time the NDC is omitted entirely (missing-NDC defect); the
+        other half the drug quantity is scaled down so it no longer matches
+        the billed units (quantity-mismatch defect).
+        """
+        if random.random() < 0.5:
+            line.drug = None
+            line.drug_quantity = None
+            line.drug_unit_type = None
+        else:
+            if line.drug_quantity is not None and line.drug_quantity > 0:
+                line.drug_quantity = round(
+                    line.drug_quantity * random.uniform(0.3, 0.8), 3
+                )
 
     def _generate_diagnoses(self, diag_pointers: list[int]) -> list[Code]:
         """Generate diagnosis list based on pointers used."""

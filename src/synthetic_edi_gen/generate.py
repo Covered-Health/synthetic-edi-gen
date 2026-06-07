@@ -351,8 +351,10 @@ def generate(
     # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create generators
-    claim_gen = ClaimGenerator(seed=seed)
+    # Create generators.  A small drug-defect rate ensures some drug lines
+    # carry defects (missing NDC, quantity mismatch) so downstream NDC edits
+    # in the batch analyzer can be exercised end-to-end.
+    claim_gen = ClaimGenerator(seed=seed, drug_defect_rate=0.10)
     payment_gen = PaymentGenerator(seed=seed)
     openar_gen = OpenARGenerator(seed=seed)
 

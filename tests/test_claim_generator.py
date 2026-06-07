@@ -241,3 +241,58 @@ class TestDrugServiceLines:
         assert line.drug is not None
         assert line.drug.code == drug.ndc
         assert line.drug_unit_type == drug.ndc_unit
+
+    def test_q_code_drug_lines_are_generated(self, claim_generator):
+        q_drugs = [d for d in BASIC_HCPCS_DRUG_CODES if d.hcpcs_code.startswith("Q")]
+        assert q_drugs, "expected Q-code entries in BASIC_HCPCS_DRUG_CODES"
+        for q_drug in q_drugs:
+            claim = claim_generator.generate_claim(forced_cpt_codes=[q_drug.hcpcs_code])
+            line = claim.service_lines[0]
+            assert line.procedure.sub_type == "HCPCS"
+            assert line.procedure.code == q_drug.hcpcs_code
+            assert line.drug is not None
+            assert line.drug.code == q_drug.ndc
+
+
+class TestDrugDefects:
+    def _drug_lines_with_defects(self, attempts=500):
+        gen = ClaimGenerator(seed=99, drug_defect_rate=0.50)
+        lines = []
+        for _ in range(attempts):
+            claim = gen.generate_claim()
+            for line in claim.service_lines:
+                if line.procedure and line.procedure.sub_type == "HCPCS":
+                    lines.append(line)
+        return lines
+
+    def test_some_drug_lines_missing_ndc(self):
+        lines = self._drug_lines_with_defects()
+        missing_ndc = [ln for ln in lines if ln.drug is None]
+        assert missing_ndc, "expected some drug lines with missing NDC"
+
+    def test_some_drug_lines_have_quantity_mismatch(self):
+        by_hcpcs = {d.hcpcs_code: d for d in BASIC_HCPCS_DRUG_CODES}
+        lines = self._drug_lines_with_defects()
+        mismatched = []
+        for line in lines:
+            if line.drug is None:
+                continue
+            drug_data = by_hcpcs.get(line.procedure.code)
+            if drug_data is None:
+                continue
+            expected_qty = round(line.unit_count * drug_data.ndc_qty_per_unit, 3)
+            if line.drug_quantity != expected_qty:
+                mismatched.append(line)
+        assert mismatched, "expected some drug lines with quantity mismatch"
+
+    def test_zero_defect_rate_produces_no_defects(self):
+        gen = ClaimGenerator(seed=42, drug_defect_rate=0.0)
+        by_hcpcs = {d.hcpcs_code: d for d in BASIC_HCPCS_DRUG_CODES}
+        for _ in range(200):
+            claim = gen.generate_claim()
+            for line in claim.service_lines:
+                if line.procedure and line.procedure.sub_type == "HCPCS":
+                    assert line.drug is not None
+                    drug_data = by_hcpcs[line.procedure.code]
+                    expected = round(line.unit_count * drug_data.ndc_qty_per_unit, 3)
+                    assert line.drug_quantity == expected

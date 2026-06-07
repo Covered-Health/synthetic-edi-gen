@@ -38,11 +38,17 @@ class TestBasicHCPCSDrugCodes:
     def test_not_empty(self):
         assert len(BASIC_HCPCS_DRUG_CODES) > 0
 
-    def test_hcpcs_codes_are_valid_jcodes(self):
+    def test_hcpcs_codes_are_valid_drug_codes(self):
         for drug in BASIC_HCPCS_DRUG_CODES:
             assert len(drug.hcpcs_code) == 5
             assert drug.hcpcs_code[0].isalpha()
             assert drug.hcpcs_code[1:].isdigit()
+
+    def test_at_least_10_j_codes_and_5_q_codes(self):
+        j_codes = [d for d in BASIC_HCPCS_DRUG_CODES if d.hcpcs_code.startswith("J")]
+        q_codes = [d for d in BASIC_HCPCS_DRUG_CODES if d.hcpcs_code.startswith("Q")]
+        assert len(j_codes) >= 10
+        assert len(q_codes) >= 5
 
     def test_unique_hcpcs_codes(self):
         codes = [d.hcpcs_code for d in BASIC_HCPCS_DRUG_CODES]
