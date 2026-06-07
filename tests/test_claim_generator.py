@@ -269,7 +269,7 @@ class TestDrugDefects:
 
     def test_some_drug_lines_missing_ndc(self):
         lines = self._drug_lines_with_defects()
-        missing_ndc = [l for l in lines if l.drug is None]
+        missing_ndc = [ln for ln in lines if ln.drug is None]
         assert missing_ndc, "expected some drug lines with missing NDC"
 
     def test_some_drug_lines_have_quantity_mismatch(self):
