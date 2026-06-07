@@ -139,18 +139,20 @@ BASIC_CPT_CODES = [
 
 
 class BasicHCPCSDrugCode(BaseModel):
-    """A HCPCS drug-administration code (J-code) paired with the NDC of a
-    representative product.
+    """A HCPCS drug-administration code paired with the NDC of a representative
+    product.
 
     When an 837P service line bills for an administered drug, the procedure is
-    a HCPCS J-code (SV101) and the drug is additionally identified by its
-    National Drug Code (LIN03) with a quantity (CTP04) and unit of measure
-    (CTP05-1). The NDC must identify the actual product the J-code administers,
-    so these fields are kept together to guarantee that correlation.
+    a HCPCS Level II code — typically a J-code or Q-code — (SV101) and the
+    drug is additionally identified by its National Drug Code (LIN03) with a
+    quantity (CTP04) and unit of measure (CTP05-1). The NDC must identify the
+    actual product the HCPCS code administers, so these fields are kept
+    together to guarantee that correlation.
     """
 
     hcpcs_code: str
-    """HCPCS Level II procedure code billed on the line (SV101)."""
+    """HCPCS Level II procedure code billed on the line (SV101),
+    e.g. a J-code or Q-code."""
     description: str
     """Long description of the HCPCS code, including its billing dosage."""
     ndc: str
@@ -175,10 +177,11 @@ class BasicHCPCSDrugCode(BaseModel):
     """Diagnoses commonly treated with this drug."""
 
 
-# Common HCPCS J-codes for clinician-administered drugs, each paired with the
-# NDC of a representative (non-controlled) product. The per-unit dosing of the
-# J-code and the strength of the NDC product determine ``ndc_qty_per_unit`` so
-# the reported drug quantity always reconciles with the billed units.
+# Common HCPCS drug codes (J-codes and Q-codes) for clinician-administered
+# drugs, each paired with the NDC of a representative product. The per-unit
+# dosing of the HCPCS code and the strength of the NDC product determine
+# ``ndc_qty_per_unit`` so the reported drug quantity always reconciles with
+# the billed units.
 BASIC_HCPCS_DRUG_CODES = [
     BasicHCPCSDrugCode(
         hcpcs_code="J1885",
@@ -300,6 +303,80 @@ BASIC_HCPCS_DRUG_CODES = [
         max_cost=7.00,
         max_units=100,
         common_icd10=["G24.5", "G43.909", "G24.3"],
+    ),
+    BasicHCPCSDrugCode(
+        hcpcs_code="J2270",
+        description="Injection, morphine sulfate, up to 10 mg",
+        ndc="00409174901",
+        drug_name="Morphine sulfate 10 mg/mL injection",
+        ndc_unit="ML",
+        ndc_qty_per_unit=1.0,  # 10 mg / (10 mg/mL)
+        min_cost=0.50,
+        max_cost=3.00,
+        max_units=4,
+        common_icd10=["M54.9", "G89.29", "R10.9"],
+    ),
+    # HCPCS Q-codes — temporary codes for drugs/biologicals (biosimilars,
+    # ESRD drugs, and other drugs awaiting permanent J-code assignment).
+    BasicHCPCSDrugCode(
+        hcpcs_code="Q2050",
+        description="Injection, darbepoetin alfa, 1 mcg (for ESRD on dialysis)",
+        ndc="55513011001",
+        drug_name="Aranesp (darbepoetin alfa) 25 mcg/mL injection",
+        ndc_unit="UN",
+        ndc_qty_per_unit=1.0,  # 1 mcg billed = 1 NDC unit
+        min_cost=3.00,
+        max_cost=8.00,
+        max_units=200,
+        common_icd10=["D63.1", "N18.6", "D64.9"],
+    ),
+    BasicHCPCSDrugCode(
+        hcpcs_code="Q5103",
+        description="Injection, infliximab-dyyb, biosimilar, 10 mg",
+        ndc="00069042101",
+        drug_name="Inflectra (infliximab-dyyb) 100 mg single-dose vial",
+        ndc_unit="ME",
+        ndc_qty_per_unit=10.0,  # 10 mg per billed unit
+        min_cost=15.00,
+        max_cost=30.00,
+        max_units=40,
+        common_icd10=["M06.9", "K50.90", "K51.90"],
+    ),
+    BasicHCPCSDrugCode(
+        hcpcs_code="Q5104",
+        description="Injection, infliximab-abda, biosimilar, 10 mg",
+        ndc="78206001101",
+        drug_name="Renflexis (infliximab-abda) 100 mg single-dose vial",
+        ndc_unit="ME",
+        ndc_qty_per_unit=10.0,  # 10 mg per billed unit
+        min_cost=14.00,
+        max_cost=28.00,
+        max_units=40,
+        common_icd10=["M06.9", "K50.90", "L40.50"],
+    ),
+    BasicHCPCSDrugCode(
+        hcpcs_code="Q5106",
+        description="Injection, bevacizumab-awwb, biosimilar, 10 mg",
+        ndc="55513099601",
+        drug_name="Mvasi (bevacizumab-awwb) 25 mg/mL injection",
+        ndc_unit="ML",
+        ndc_qty_per_unit=0.4,  # 10 mg / (25 mg/mL)
+        min_cost=20.00,
+        max_cost=45.00,
+        max_units=100,
+        common_icd10=["C34.90", "C18.9", "C56.9"],
+    ),
+    BasicHCPCSDrugCode(
+        hcpcs_code="Q5112",
+        description="Injection, trastuzumab-dttb, biosimilar, 10 mg",
+        ndc="00781345801",
+        drug_name="Ontruzant (trastuzumab-dttb) 150 mg single-dose vial",
+        ndc_unit="ME",
+        ndc_qty_per_unit=10.0,  # 10 mg per billed unit
+        min_cost=18.00,
+        max_cost=35.00,
+        max_units=44,
+        common_icd10=["C50.911", "C50.919", "C16.9"],
     ),
 ]
 
