@@ -246,9 +246,7 @@ class TestDrugServiceLines:
         q_drugs = [d for d in BASIC_HCPCS_DRUG_CODES if d.hcpcs_code.startswith("Q")]
         assert q_drugs, "expected Q-code entries in BASIC_HCPCS_DRUG_CODES"
         for q_drug in q_drugs:
-            claim = claim_generator.generate_claim(
-                forced_cpt_codes=[q_drug.hcpcs_code]
-            )
+            claim = claim_generator.generate_claim(forced_cpt_codes=[q_drug.hcpcs_code])
             line = claim.service_lines[0]
             assert line.procedure.sub_type == "HCPCS"
             assert line.procedure.code == q_drug.hcpcs_code
