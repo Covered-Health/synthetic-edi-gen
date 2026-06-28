@@ -155,6 +155,17 @@ class TestPaymentLineDetails:
         for line in payment.service_lines:
             assert line.paid_amount <= line.charge_amount
 
+    def test_institutional_revenue_codes_are_copied(self):
+        cg = ClaimGenerator(seed=42)
+        pg = PaymentGenerator(seed=42)
+        claim = cg.generate_institutional_claim()
+        payment = pg.generate_payment_for_claim(claim)
+
+        assert payment.statement_date_from == claim.statement_date_from
+        assert payment.statement_date_to == claim.statement_date_to
+        for cl, pl in zip(claim.service_lines, payment.service_lines, strict=True):
+            assert pl.revenue_code == cl.revenue_code
+
 
 class TestReproducibility:
     def test_same_seed_produces_same_payment(self):

@@ -1,5 +1,5 @@
 """
-Generate realistic 837P (Professional) claims.
+Generate realistic 837P professional and 837I institutional claims.
 """
 
 # ruff: noqa: S311 # insecure random numbers are fine here
@@ -7,12 +7,15 @@ import random
 import string
 import uuid
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal, cast
 
 from synthetic_edi_gen.edi_models import (
     Address,
     Code,
+    InstClaim,
+    InstDiagnosis,
+    InstLine,
     Party,
     PartyIdName,
     Patient,
@@ -58,6 +61,23 @@ from .reference_data import (
 # Fraction of (non-forced) service lines that bill an administered drug, where
 # the line carries a HCPCS J/Q-code procedure plus the drug's NDC information.
 DRUG_LINE_PROBABILITY = 0.12
+
+_INST_REVENUE_CODES: dict[str, tuple[str, str]] = {
+    "clinic": ("0510", "Clinic"),
+    "lab": ("0300", "Laboratory"),
+    "radiology": ("0320", "Diagnostic radiology"),
+    "operating_room": ("0360", "Operating room services"),
+    "pharmacy": ("0250", "Pharmacy"),
+    "supplies": ("0270", "Medical/surgical supplies"),
+    "room": ("0120", "Room and board - semi-private"),
+}
+
+_INST_REVENUE_BY_SPECIALTY = {
+    "Laboratory": _INST_REVENUE_CODES["lab"],
+    "Radiology": _INST_REVENUE_CODES["radiology"],
+    "Orthopedics": _INST_REVENUE_CODES["operating_room"],
+    "General Surgery": _INST_REVENUE_CODES["operating_room"],
+}
 
 RENDERING_PROVIDER_TAXONOMIES = [
     # Primary Care
@@ -247,6 +267,7 @@ class PatientContext:
     billing_provider: Provider
     rendering_provider: Provider
     base_service_date: date
+    institutional_billing_provider: Provider | None = None
     mrn: str | None = None
     pos: PlaceOfService = field(default_factory=lambda: random.choice(PLACE_OF_SERVICE))
 
@@ -322,6 +343,7 @@ class ClaimGenerator:
             group_or_policy_number=generate_member_id()[:10],
             payer_info=payer_info,
             billing_provider=self._generate_billing_provider(),
+            institutional_billing_provider=self._generate_institutional_billing_provider(),
             rendering_provider=self._generate_rendering_provider(),
             base_service_date=service_date
             or generate_service_date(days_ago_min=1, days_ago_max=90),
@@ -404,47 +426,8 @@ class ClaimGenerator:
             ),
             service_date_from=svc_date,
             service_date_to=svc_date,
-            subscriber=Subscriber(
-                payer_responsibility_sequence="PRIMARY",
-                relationship_type="SELF",
-                group_or_policy_number=ctx.group_or_policy_number,
-                claim_filing_indicator_code=ctx.payer_info.claim_filing_code,
-                insurance_plan_type=ctx.payer_info.plan_type,
-                person=PersonWithDemographic(
-                    entity_role="INSURED_SUBSCRIBER",
-                    entity_type="INDIVIDUAL",
-                    identification_type="MEMBER_ID",
-                    identifier=ctx.member_id,
-                    last_name_or_org_name=ctx.subscriber_last,
-                    first_name=ctx.subscriber_first,
-                    middle_name=ctx.subscriber_middle,
-                    birth_date=ctx.subscriber_dob,
-                    gender=ctx.subscriber_gender,
-                    address=ctx.subscriber_address,
-                ),
-                payer=Party(
-                    entity_role="PAYER",
-                    entity_type="BUSINESS",
-                    identification_type="PAYOR_ID",
-                    identifier=ctx.payer_info.identifier,
-                    tax_id=ctx.payer_info.tax_id,
-                    last_name_or_org_name=ctx.payer_info.name,
-                    address=generate_address(),
-                ),
-            ),
-            patient=Patient(
-                relationship_type=ctx.relationship,
-                person=PersonWithDemographic(
-                    entity_role="PATIENT",
-                    entity_type="INDIVIDUAL",
-                    last_name_or_org_name=ctx.patient_last,
-                    first_name=ctx.patient_first,
-                    middle_name=ctx.patient_middle,
-                    birth_date=ctx.patient_dob,
-                    gender=ctx.patient_gender,
-                    address=ctx.patient_address,
-                ),
-            ),
+            subscriber=self._generate_subscriber(ctx),
+            patient=self._generate_patient(ctx),
             provider_signature_indicator="Y",
             assignment_participation_code="A",
             assignment_certification_indicator="Y",
@@ -455,6 +438,87 @@ class ClaimGenerator:
             diags=diags,
             service_lines=service_lines,
             transaction=self._generate_transaction(pcn),
+        )
+
+    def generate_institutional_claim(
+        self,
+        ctx: PatientContext | None = None,
+        service_date: date | None = None,
+        forced_cpt_codes: list[str] | None = None,
+        forced_icd10_codes: list[str] | None = None,
+    ) -> InstClaim:
+        """Generate a single realistic 837I institutional claim."""
+        if ctx is None:
+            ctx = self.generate_patient_context(service_date=service_date)
+
+        pcn = self._generate_unique_pcn()
+        svc_date = service_date or ctx.base_service_date
+        is_inpatient = self._is_inpatient_inst_claim(forced_cpt_codes)
+        stay_days = random.randint(1, 5) if is_inpatient and not forced_cpt_codes else 0
+        statement_to = svc_date + timedelta(days=stay_days)
+
+        service_lines = self._generate_institutional_service_lines(
+            svc_date,
+            stay_days + 1,
+            forced_cpt_codes=forced_cpt_codes,
+        )
+        total_charge = sum(line.charge_amount for line in service_lines)
+
+        if forced_icd10_codes:
+            diags = self._build_forced_inst_diagnoses(
+                forced_icd10_codes,
+                include_poa=is_inpatient,
+            )
+        else:
+            diags = self._generate_inst_diagnoses(include_poa=is_inpatient)
+
+        facility_code, patient_status = self._institutional_claim_codes(is_inpatient)
+        admission_dt = None
+        discharge_dt = None
+        if is_inpatient:
+            admission_dt = self._aware_datetime(svc_date, random.randint(0, 23))
+            if patient_status != "30":
+                discharge_dt = self._aware_datetime(statement_to, random.randint(8, 18))
+
+        return InstClaim(
+            id=str(uuid.uuid4()).replace("-", "")[:24],
+            object_type="CLAIM",
+            patient_control_number=pcn,
+            charge_amount=float(round(total_charge, 2)),
+            facility_code=facility_code,
+            frequency_code=Code(
+                sub_type="FREQUENCY_CODE",
+                code="1",
+                desc="Original claim",
+            ),
+            statement_date_from=svc_date,
+            statement_date_to=statement_to,
+            service_date_from=svc_date,
+            service_date_to=statement_to,
+            subscriber=self._generate_subscriber(ctx),
+            patient=self._generate_patient(ctx),
+            assignment_participation_code="A",
+            assignment_certification_indicator="Y",
+            release_of_information_code="Y",
+            medical_record_number=ctx.mrn,
+            admission_date_and_hour=admission_dt,
+            discharge_time=discharge_dt,
+            admission_type_code=random.choice(["1", "2", "3"])
+            if is_inpatient
+            else None,
+            admission_source_code=random.choice(["1", "2", "7"])
+            if is_inpatient
+            else None,
+            patient_status_code=patient_status,
+            billing_provider=ctx.institutional_billing_provider or ctx.billing_provider,
+            providers=[
+                ctx.rendering_provider.model_copy(update={"entity_role": "ATTENDING"})
+            ],
+            diags=diags,
+            service_lines=service_lines,
+            transaction=self._generate_transaction(
+                pcn, transaction_type="institutional"
+            ),
         )
 
     def _generate_unique_pcn(self) -> str:
@@ -532,6 +596,96 @@ class ClaimGenerator:
                 modifiers=modifiers,
             ),
             diag_pointers=diag_pointers,
+        )
+
+    def _generate_institutional_service_lines(
+        self,
+        service_date: date,
+        stay_days: int,
+        forced_cpt_codes: list[str] | None = None,
+    ) -> list[InstLine]:
+        if forced_cpt_codes:
+            return [
+                self._generate_institutional_service_line(i + 1, service_date, code)
+                for i, code in enumerate(forced_cpt_codes)
+            ]
+
+        lines: list[InstLine] = []
+        if stay_days > 1:
+            lines.append(self._generate_room_and_board_line(1, service_date, stay_days))
+
+        num_ancillary = random.choices([1, 2, 3, 4], weights=[35, 35, 20, 10])[0]
+        for _ in range(num_ancillary):
+            lines.append(
+                self._generate_institutional_service_line(
+                    len(lines) + 1,
+                    service_date + timedelta(days=random.randint(0, stay_days - 1)),
+                )
+            )
+        return lines
+
+    @staticmethod
+    def _generate_room_and_board_line(
+        line_num: int,
+        service_date: date,
+        stay_days: int,
+    ) -> InstLine:
+        rev_code, rev_desc = _INST_REVENUE_CODES["room"]
+        charge = random_float(900.0, 2500.0) * stay_days
+        return InstLine(
+            source_line_id=f"LINE{line_num}",
+            charge_amount=float(round(charge, 2)),
+            service_date_from=service_date,
+            service_date_to=service_date + timedelta(days=stay_days - 1),
+            unit_type="DAY",
+            unit_count=float(stay_days),
+            revenue_code=Code(
+                sub_type="REVENUE_CODE",
+                code=rev_code,
+                desc=rev_desc,
+            ),
+        )
+
+    @staticmethod
+    def _generate_institutional_service_line(
+        line_num: int,
+        service_date: date,
+        forced_cpt: str | None = None,
+    ) -> InstLine:
+        if forced_cpt:
+            matches = [c for c in BASIC_CPT_CODES if c.code == forced_cpt]
+            cpt_data = matches[0] if matches else random.choice(BASIC_CPT_CODES)
+        else:
+            cpt_data = random.choice(BASIC_CPT_CODES)
+
+        rev_code, rev_desc = _INST_REVENUE_BY_SPECIALTY.get(
+            cpt_data.specialty,
+            _INST_REVENUE_CODES["clinic"],
+        )
+        units = random.randint(2, 5) if random.random() < 0.08 else 1
+        charge = (
+            random_float(cpt_data.min_cost, cpt_data.max_cost)
+            * random_float(1.4, 3.5)
+            * units
+        )
+
+        return InstLine(
+            source_line_id=f"LINE{line_num}",
+            charge_amount=float(round(charge, 2)),
+            service_date_from=service_date,
+            service_date_to=service_date,
+            unit_type="UNIT",
+            unit_count=float(units),
+            revenue_code=Code(
+                sub_type="REVENUE_CODE",
+                code=rev_code,
+                desc=rev_desc,
+            ),
+            procedure=Procedure(
+                sub_type="CPT",
+                code=cpt_data.code,
+                desc=cpt_data.description,
+            ),
         )
 
     @staticmethod
@@ -651,6 +805,94 @@ class ClaimGenerator:
                 diags.append(Code(sub_type=subtype, code=code, desc=code))
         return diags
 
+    def _generate_inst_diagnoses(self, include_poa: bool) -> list[InstDiagnosis]:
+        num_diags = random.randint(1, 4)
+        selected_codes = random.sample(
+            BASIC_ICD10_CODES,
+            min(num_diags, len(BASIC_ICD10_CODES)),
+        )
+        return [
+            InstDiagnosis(
+                sub_type="ICD_10_PRINCIPAL" if i == 0 else "ICD_10",
+                code=icd_data.code,
+                desc=icd_data.description,
+                present_on_admission_indicator=self._poa_indicator(i, include_poa),
+            )
+            for i, icd_data in enumerate(selected_codes)
+        ]
+
+    def _build_forced_inst_diagnoses(
+        self,
+        icd10_codes: list[str],
+        include_poa: bool,
+    ) -> list[InstDiagnosis]:
+        by_code = {c.formatted_code: c for c in BASIC_ICD10_CODES}
+        diags: list[InstDiagnosis] = []
+        for i, code in enumerate(icd10_codes):
+            icd_data = by_code.get(code)
+            diags.append(
+                InstDiagnosis(
+                    sub_type="ICD_10_PRINCIPAL" if i == 0 else "ICD_10",
+                    code=icd_data.code if icd_data else code,
+                    desc=icd_data.description if icd_data else code,
+                    present_on_admission_indicator=self._poa_indicator(i, include_poa),
+                )
+            )
+        return diags
+
+    @staticmethod
+    def _poa_indicator(index: int, include_poa: bool) -> str | None:
+        if not include_poa:
+            return None
+        return "Y" if index == 0 else random.choice(["Y", "N", "U", "W"])
+
+    @staticmethod
+    def _generate_subscriber(ctx: PatientContext) -> Subscriber:
+        return Subscriber(
+            payer_responsibility_sequence="PRIMARY",
+            relationship_type="SELF",
+            group_or_policy_number=ctx.group_or_policy_number,
+            claim_filing_indicator_code=ctx.payer_info.claim_filing_code,
+            insurance_plan_type=ctx.payer_info.plan_type,
+            person=PersonWithDemographic(
+                entity_role="INSURED_SUBSCRIBER",
+                entity_type="INDIVIDUAL",
+                identification_type="MEMBER_ID",
+                identifier=ctx.member_id,
+                last_name_or_org_name=ctx.subscriber_last,
+                first_name=ctx.subscriber_first,
+                middle_name=ctx.subscriber_middle,
+                birth_date=ctx.subscriber_dob,
+                gender=ctx.subscriber_gender,
+                address=ctx.subscriber_address,
+            ),
+            payer=Party(
+                entity_role="PAYER",
+                entity_type="BUSINESS",
+                identification_type="PAYOR_ID",
+                identifier=ctx.payer_info.identifier,
+                tax_id=ctx.payer_info.tax_id,
+                last_name_or_org_name=ctx.payer_info.name,
+                address=generate_address(),
+            ),
+        )
+
+    @staticmethod
+    def _generate_patient(ctx: PatientContext) -> Patient:
+        return Patient(
+            relationship_type=ctx.relationship,
+            person=PersonWithDemographic(
+                entity_role="PATIENT",
+                entity_type="INDIVIDUAL",
+                last_name_or_org_name=ctx.patient_last,
+                first_name=ctx.patient_first,
+                middle_name=ctx.patient_middle,
+                birth_date=ctx.patient_dob,
+                gender=ctx.patient_gender,
+                address=ctx.patient_address,
+            ),
+        )
+
     def _generate_billing_provider(self) -> Provider:
         """Generate billing provider information."""
         org_names = [
@@ -663,6 +905,26 @@ class ClaimGenerator:
 
         suffix = random.choice(["LLC", "PC", "PA", "INC"])
         name = f"{random.choice(org_names)} {suffix}"
+
+        return Provider(
+            entity_role="BILLING_PROVIDER",
+            entity_type="BUSINESS",
+            identification_type="NPI",
+            identifier=generate_npi(),
+            tax_id=generate_tax_id(),
+            last_name_or_org_name=name,
+            address=generate_address(),
+        )
+
+    def _generate_institutional_billing_provider(self) -> Provider:
+        org_names = [
+            "GENERAL HOSPITAL",
+            "REGIONAL MEDICAL CENTER",
+            "COMMUNITY HOSPITAL",
+            "MEMORIAL HOSPITAL",
+            "UNIVERSITY MEDICAL CENTER",
+        ]
+        name = random.choice(org_names)
 
         return Provider(
             entity_role="BILLING_PROVIDER",
@@ -738,11 +1000,57 @@ class ClaimGenerator:
             ),
         )
 
-    def _generate_transaction(self, pcn: str) -> Transaction837:
+    @staticmethod
+    def _is_inpatient_inst_claim(forced_cpt_codes: list[str] | None) -> bool:
+        if forced_cpt_codes and set(forced_cpt_codes) & {
+            "27447",
+            "47562",
+            "29881",
+            "49505",
+        }:
+            return True
+        return random.random() < 0.35
+
+    @staticmethod
+    def _institutional_claim_codes(is_inpatient: bool) -> tuple[Code, str]:
+        facility_options = (
+            [("11", "Hospital inpatient"), ("21", "Skilled nursing inpatient")]
+            if is_inpatient
+            else [("13", "Hospital outpatient"), ("32", "Home health")]
+        )
+        facility_code, facility_desc = random.choice(facility_options)
+        patient_status = (
+            random.choices(
+                ["01", "02", "03", "06", "30"],
+                weights=[70, 8, 8, 7, 7],
+                k=1,
+            )[0]
+            if is_inpatient
+            else "01"
+        )
+        return (
+            Code(
+                sub_type="UB_FACILITY_TYPE",
+                code=facility_code,
+                desc=facility_desc,
+            ),
+            patient_status,
+        )
+
+    @staticmethod
+    def _aware_datetime(day: date, hour: int) -> datetime:
+        return datetime.combine(day, time(hour=hour), tzinfo=UTC)
+
+    def _generate_transaction(
+        self,
+        pcn: str,
+        transaction_type: Literal["professional", "institutional"] = "professional",
+    ) -> Transaction837:
         """Generate transaction metadata."""
+        is_inst = transaction_type == "institutional"
         return Transaction837(
             control_number=pcn[:8],
-            transaction_type="PROF",
+            transaction_type="INST" if is_inst else "PROF",
             hierarchical_structure_code="0019",
             purpose_code="00",
             originator_application_transaction_id=pcn[:8],
@@ -750,7 +1058,9 @@ class ClaimGenerator:
             creation_time=datetime.now().time(),
             claim_or_encounter_identifier_type="CHARGEABLE",
             transaction_set_identifier_code="837",
-            implementation_convention_reference="005010X222A1",
+            implementation_convention_reference=(
+                "005010X223A2" if is_inst else "005010X222A1"
+            ),
             sender=PartyIdName(
                 entity_role="SUBMITTER",
                 entity_type="BUSINESS",
