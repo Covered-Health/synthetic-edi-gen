@@ -312,6 +312,9 @@ def generate(
     unmatched_ar_rate: Annotated[
         float, Parameter(validator=Number(gte=0.0, lte=1.0))
     ] = 0.05,
+    institutional_claim_rate: Annotated[
+        float, Parameter(validator=Number(gte=0.0, lte=1.0))
+    ] = 0.30,
     seed: int | None = None,
     batch_size: int = 10000,
     claims_per_file: int = 10000,
@@ -331,6 +334,7 @@ def generate(
         output_dir: Output directory for generated files
         match_rate: Percentage of claims with matching payments, 0.0-1.0
         unmatched_ar_rate: Percentage of additional unmatched AR rows, 0.0-1.0
+        institutional_claim_rate: Percentage of 837 claims emitted as 837I
         seed: Random seed for reproducibility
         batch_size: Batch size for progress reporting and disk flushing
         claims_per_file: Max 837 claims per file (0 = single file)
@@ -344,6 +348,7 @@ def generate(
     print(f"Generating {count:,} EDI claim/payment pairs...")
     print(f"Match rate: {match_rate:.0%}")
     print(f"Unmatched AR rate: {unmatched_ar_rate:.0%}")
+    print(f"837I claim rate: {institutional_claim_rate:.0%}")
     print(f"Output directory: {output_dir}")
     if seed is not None:
         print(f"Random seed: {seed}")
@@ -364,6 +369,7 @@ def generate(
     print(f"  HAR groups: {len(har_groups):,} ({multi_pcn_hars:,} with multiple PCNs)")
 
     ar_rows: list[dict] = []
+    claim_type_counts = {"PROF": 0, "INST": 0}
 
     # Patient registry: returning patients share the same MRN, name, DoB,
     # etc. across different encounters.  MRN is stored on each context.
@@ -395,12 +401,22 @@ def generate(
                     days=random.randint(0, min(14, group_size))
                 )
 
-            claim = claim_gen.generate_claim(
-                ctx=ctx,
-                service_date=svc_date,
-                forced_cpt_codes=forced_cpt_codes,
-                forced_icd10_codes=forced_icd10_codes,
-            )
+            if institutional_claim_rate and random.random() < institutional_claim_rate:
+                claim = claim_gen.generate_institutional_claim(
+                    ctx=ctx,
+                    service_date=svc_date,
+                    forced_cpt_codes=forced_cpt_codes,
+                    forced_icd10_codes=forced_icd10_codes,
+                )
+            else:
+                claim = claim_gen.generate_claim(
+                    ctx=ctx,
+                    service_date=svc_date,
+                    forced_cpt_codes=forced_cpt_codes,
+                    forced_icd10_codes=forced_icd10_codes,
+                )
+            claim_type = claim.transaction.transaction_type or "PROF"
+            claim_type_counts[claim_type] = claim_type_counts.get(claim_type, 0) + 1
             claims_writer.write(claim)
 
             # Independent payment per claim
@@ -522,6 +538,10 @@ def generate(
 
     print("\n✓ Generation complete!")
     print(f"  Claims written: {claims_written:,} → {n_claim_files} file(s)")
+    print(
+        f"  Claim types: {claim_type_counts.get('PROF', 0):,} 837P,"
+        f" {claim_type_counts.get('INST', 0):,} 837I"
+    )
     for f in claims_writer.files_created:
         print(f"    {f}")
     print(f"  Payments written: {payments_written:,} → {n_payment_files} file(s)")

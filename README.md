@@ -22,11 +22,12 @@ uv run synthetic-edi-gen --count 1000 --seed 42 --output-dir ./output
 | `--output-dir` | Output directory | `./edi_output` |
 | `--match-rate` | Fraction of claims with matching payments (0.0-1.0) | `0.95` |
 | `--unmatched-ar-rate` | Fraction of additional unmatched AR rows (0.0-1.0) | `0.05` |
+| `--institutional-claim-rate` | Fraction of 837 claims emitted as 837I institutional records (0.0-1.0) | `0.30` |
 | `--seed` | Random seed for reproducibility | `None` |
 | `--batch-size` | Batch size for progress reporting | `10000` |
 
 ### Output files
 
-- `837_claims.jsonl` — one JSON object per line, each a realistic 837P professional claim
+- `837_claims.jsonl` — one JSON object per line, each a realistic 837P professional or 837I institutional claim
 - `835_payments.jsonl` — matching 835 payment/remittance records
 - `openar.xlsx` — OpenAR accounts receivable report correlated with claims/payments

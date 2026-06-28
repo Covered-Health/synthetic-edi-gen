@@ -135,7 +135,9 @@ class OpenARGenerator:
         facility_code = claim.get("facilityCode", {})
         pos_code = facility_code.get("code", "11")
         department = random.choice(DEPARTMENTS)
-        place_of_service = f"{department} - POS {pos_code}"
+        claim_form_type = self._claim_form_type(claim)
+        place_prefix = "UB" if claim_form_type == "UB Claim" else "POS"
+        place_of_service = f"{department} - {place_prefix} {pos_code}"
 
         # Build payment lookup by service line
         payment_by_line: dict[str, dict[str, Any]] = {}
@@ -209,6 +211,7 @@ class OpenARGenerator:
                 payment_line=payment_by_line.get(service_line.get("sourceLineId")),
                 payment_posted=payment_posted,
                 claim_denied=claim_denied,
+                claim_form_type=claim_form_type,
             )
             rows.append(row)
 
@@ -332,6 +335,7 @@ class OpenARGenerator:
         payment_line: dict[str, Any] | None,
         payment_posted: bool = True,
         claim_denied: bool = False,
+        claim_form_type: str = "CMS Claim",
     ) -> dict[str, Any]:
         """Generate a single AR row from service line data.
 
@@ -341,8 +345,9 @@ class OpenARGenerator:
         - If 835 received but payment not posted: allowed amount is outstanding
         - If 835 received and payment posted: $0 outstanding (insurance has paid)
         """
-        procedure = service_line.get("procedure", {})
-        procedure_code = procedure.get("code", "")
+        procedure = service_line.get("procedure") or {}
+        revenue_code = service_line.get("revenueCode") or {}
+        procedure_code = procedure.get("code") or revenue_code.get("code", "")
         charge_amount = float(service_line.get("chargeAmount", 0))
 
         # Denied by 835 (claim or line with denial CARC): zero paid, full outstanding
@@ -399,7 +404,7 @@ class OpenARGenerator:
             "Posted Amount ($)": float(round(charge_amount, 2)),
             "Claim Status": claim_status,
             "Crossover Status": crossover_status,
-            "Claim Form Type": random.choice(CLAIM_FORM_TYPES),
+            "Claim Form Type": claim_form_type,
             "Place of Service": place_of_service,
             "Department": department,
             "Hospital Account ID": hospital_account_id,
@@ -417,6 +422,13 @@ class OpenARGenerator:
             if code and code in DENIAL_CARC_CODES:
                 return True
         return False
+
+    @staticmethod
+    def _claim_form_type(claim: dict[str, Any]) -> str:
+        transaction = claim.get("transaction") or {}
+        return (
+            "UB Claim" if transaction.get("transactionType") == "INST" else "CMS Claim"
+        )
 
     def _get_age_bucket(self, age_days: int) -> str:
         """Get the age bucket label for a given number of days."""

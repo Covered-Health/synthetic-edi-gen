@@ -118,6 +118,39 @@ class TestGenerate:
             assert record["objectType"] == "CLAIM"
             assert "patientControlNumber" in record
 
+    def test_institutional_claim_rate_mixes_837i_records(self, tmp_path):
+        output_dir = tmp_path / "output"
+        generate(
+            count=50,
+            output_dir=output_dir,
+            seed=42,
+            institutional_claim_rate=0.5,
+            unmatched_ar_rate=0.0,
+        )
+
+        claims = [
+            json.loads(line) for line in _read_all_jsonl(output_dir, "837_claims")
+        ]
+        claim_types = {c["transaction"]["transactionType"] for c in claims}
+        assert claim_types == {"PROF", "INST"}
+
+        institutional_claims = [
+            c for c in claims if c["transaction"]["transactionType"] == "INST"
+        ]
+        assert institutional_claims
+        for claim in institutional_claims:
+            assert claim["transaction"]["implementationConventionReference"] == (
+                "005010X223A2"
+            )
+            assert claim["facilityCode"]["subType"] == "UB_FACILITY_TYPE"
+            assert all(line["revenueCode"] for line in claim["serviceLines"])
+
+        import csv
+
+        with open(output_dir / "openar.csv") as f:
+            rows = list(csv.DictReader(f.readlines()[9:]))
+        assert any(row["Claim Form Type"] == "UB Claim" for row in rows)
+
     def test_payments_are_valid_json(self, tmp_path):
         output_dir = tmp_path / "output"
         generate(count=5, output_dir=output_dir, seed=42)
@@ -276,7 +309,7 @@ class TestGenerate:
             for c in patient_claims:
                 visit_cpts = set()
                 for sl in c.get("serviceLines", []):
-                    proc = sl.get("procedure", {})
+                    proc = sl.get("procedure") or {}
                     visit_cpts.add(proc.get("code", ""))
                 cpts_across_visits.append(visit_cpts)
 

@@ -11,6 +11,8 @@ from typing import Any
 from synthetic_edi_gen.edi_models import (
     Adjustment,
     Code,
+    InstClaim,
+    InstLine,
     Party,
     PatientSubscriber835,
     Payment,
@@ -40,7 +42,7 @@ class PaymentGenerator:
         if seed is not None:
             random.seed(seed)
 
-    def generate_payment_for_claim(self, claim: ProfClaim) -> Payment:
+    def generate_payment_for_claim(self, claim: ProfClaim | InstClaim) -> Payment:
         """
         Generate a matching 835 payment for a given 837 claim.
 
@@ -55,7 +57,11 @@ class PaymentGenerator:
         service_lines = claim.service_lines or []
 
         # Generate payment date (5-45 days after service)
-        claim_date = claim.service_date_from or date.today()
+        claim_date = (
+            claim.service_date_from
+            or getattr(claim, "statement_date_from", None)
+            or date.today()
+        )
         payment_date = claim_date + timedelta(days=random.randint(5, 45))
 
         # Process service lines with payment logic
@@ -116,6 +122,8 @@ class PaymentGenerator:
             payment_amount=float(total_paid),
             facility_code=claim.facility_code,
             frequency_code=claim.frequency_code,
+            statement_date_from=getattr(claim, "statement_date_from", None),
+            statement_date_to=getattr(claim, "statement_date_to", None),
             service_date_from=claim.service_date_from,
             service_date_to=claim.service_date_to,
             claim_status_code=claim_status_code,
@@ -156,7 +164,7 @@ class PaymentGenerator:
             return {"type": "full_denial"}
 
     def _process_service_line(
-        self, claim_line: ProfLine, scenario: dict[str, Any]
+        self, claim_line: ProfLine | InstLine, scenario: dict[str, Any]
     ) -> PaymentLine:
         """Process a service line and generate payment information."""
         charge_amount = float(claim_line.charge_amount)
@@ -268,8 +276,10 @@ class PaymentGenerator:
             charge_amount=float(charge_amount),
             paid_amount=float(paid_amount),
             service_date_from=claim_line.service_date_from,
+            service_date_to=claim_line.service_date_to,
             unit_count=claim_line.unit_count,
             procedure=claim_line.procedure,
+            revenue_code=getattr(claim_line, "revenue_code", None),
             adjustments=adjustments if adjustments else None,
             remarks=remarks,
             remark_codes=[r.code for r in remarks] if remarks else None,

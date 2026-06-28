@@ -151,6 +151,51 @@ class TestGenerateClaim:
         assert rp.identifier  # NPI
 
 
+class TestGenerateInstitutionalClaim:
+    def test_institutional_claim_structure(self, claim_generator):
+        claim = claim_generator.generate_institutional_claim()
+
+        assert claim.object_type == "CLAIM"
+        assert claim.patient_control_number
+        assert claim.charge_amount > 0
+        assert claim.statement_date_from is not None
+        assert claim.statement_date_to is not None
+        assert claim.facility_code.sub_type == "UB_FACILITY_TYPE"
+        assert claim.patient_status_code
+        assert claim.service_lines
+        assert claim.diags
+        assert claim.transaction.transaction_type == "INST"
+        assert claim.transaction.implementation_convention_reference == "005010X223A2"
+
+    def test_institutional_lines_have_revenue_codes(self, claim_generator):
+        claim = claim_generator.generate_institutional_claim()
+
+        assert claim.service_lines
+        for line in claim.service_lines:
+            assert line.revenue_code is not None
+            assert line.revenue_code.sub_type == "REVENUE_CODE"
+            assert line.charge_amount > 0
+
+    def test_institutional_charge_equals_sum_of_lines(self, claim_generator):
+        claim = claim_generator.generate_institutional_claim()
+        line_total = sum(line.charge_amount for line in claim.service_lines)
+        assert abs(claim.charge_amount - line_total) < 0.01
+
+    def test_forced_institutional_codes_stay_consistent(self, claim_generator):
+        claim = claim_generator.generate_institutional_claim(
+            forced_cpt_codes=["27447"],
+            forced_icd10_codes=["M17.11"],
+        )
+
+        line = claim.service_lines[0]
+        assert line.procedure is not None
+        assert line.procedure.code == "27447"
+        assert line.revenue_code is not None
+        assert line.revenue_code.code == "0360"
+        assert claim.diags[0].code == "M1711"
+        assert claim.diags[0].present_on_admission_indicator == "Y"
+
+
 class TestUniquePcns:
     def test_multiple_claims_have_unique_pcns(self, claim_generator):
         claims = [claim_generator.generate_claim() for _ in range(50)]
