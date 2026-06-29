@@ -129,6 +129,14 @@ class TestGenerateClaim:
         claim = claim_generator.generate_claim(service_date=custom_date)
         assert claim.service_date_from == custom_date
 
+    def test_generate_revised_claim_marks_replacement(self, claim_generator):
+        claim = claim_generator.generate_claim()
+        revised = claim_generator.generate_revised_claim(claim)
+
+        assert revised.patient_control_number != claim.patient_control_number
+        assert revised.original_reference_number == claim.patient_control_number
+        assert revised.frequency_code.code == "7"
+
     def test_claim_uses_shared_context(self, claim_generator):
         ctx = claim_generator.generate_patient_context()
         claim = claim_generator.generate_claim(ctx=ctx)

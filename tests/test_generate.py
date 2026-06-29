@@ -4,6 +4,7 @@ import json
 
 from synthetic_edi_gen.generate import (
     SplitFileWriter,
+    _merge_payment_dicts,
     _plan_har_groups,
     generate,
     write_jsonl,
@@ -60,6 +61,39 @@ class TestWriteJsonl:
 
         lines = output.read_text().strip().split("\n")
         assert len(lines) == 3
+
+
+class TestPaymentMerging:
+    def test_merge_payment_dicts_adds_secondary_paid_amounts_by_line(self):
+        primary = {
+            "paymentAmount": 60.0,
+            "claimStatusCode": "19",
+            "claimStatus": "PRIMARY_FORWARDED",
+            "serviceLines": [
+                {
+                    "sourceLineId": "LINE1",
+                    "paidAmount": 60.0,
+                    "adjustments": [{"group": "CONTRACTUAL"}],
+                }
+            ],
+        }
+        secondary = {
+            "paymentAmount": 25.0,
+            "serviceLines": [
+                {
+                    "sourceLineId": "LINE1",
+                    "paidAmount": 25.0,
+                    "adjustments": [{"group": "PATIENT_RESPONSIBILITY"}],
+                }
+            ],
+        }
+
+        merged = _merge_payment_dicts(primary, secondary)
+
+        assert merged["paymentAmount"] == 85.0
+        assert merged["claimStatus"] == "PRIMARY"
+        assert merged["serviceLines"][0]["paidAmount"] == 85.0
+        assert len(merged["serviceLines"][0]["adjustments"]) == 2
 
 
 def _read_all_jsonl(output_dir, prefix):
@@ -159,6 +193,43 @@ class TestGenerate:
             if line:
                 record = json.loads(line)
                 assert record["objectType"] == "PAYMENT"
+
+    def test_secondary_payer_rate_adds_extra_835s(self, tmp_path):
+        output_dir = tmp_path / "output"
+        generate(
+            count=5,
+            output_dir=output_dir,
+            seed=42,
+            match_rate=1.0,
+            secondary_payer_payment_rate=1.0,
+            revised_claim_rate=0.0,
+            unmatched_ar_rate=0.0,
+        )
+
+        payments = [
+            json.loads(line) for line in _read_all_jsonl(output_dir, "835_payments")
+        ]
+        assert len(payments) == 10
+        assert any(p["claimStatus"] == "SECONDARY" for p in payments)
+
+    def test_revised_claim_rate_adds_replacement_claims(self, tmp_path):
+        output_dir = tmp_path / "output"
+        generate(
+            count=150,
+            output_dir=output_dir,
+            seed=42,
+            match_rate=1.0,
+            secondary_payer_payment_rate=0.0,
+            revised_claim_rate=1.0,
+            unmatched_ar_rate=0.0,
+        )
+
+        claims = [
+            json.loads(line) for line in _read_all_jsonl(output_dir, "837_claims")
+        ]
+        revised = [c for c in claims if c["frequencyCode"]["code"] == "7"]
+        assert revised
+        assert all(c["originalReferenceNumber"] for c in revised)
 
     def test_unmatched_ar_rows_generated(self, tmp_path):
         output_dir = tmp_path / "output"
@@ -369,6 +440,7 @@ class TestGenerate:
             output_dir=output_dir,
             seed=42,
             match_rate=1.0,
+            secondary_payer_payment_rate=0.0,
             payments_per_file=3,
         )
         import glob
