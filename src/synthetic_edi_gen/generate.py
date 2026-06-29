@@ -2,15 +2,17 @@
 
 # ruff: noqa: S311
 import random
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Literal, TextIO
+from typing import Annotated, Any, Literal, TextIO
 
 from cyclopts import Parameter
 from cyclopts.validators import Number
 
 from synthetic_edi_gen._base import EDIBaseModel
+from synthetic_edi_gen.edi_models import Payment
 
 from .claim_generator import ClaimGenerator, PatientContext
 from .helpers import generate_service_date
@@ -303,6 +305,58 @@ class SplitFileWriter:
 
 
 _DEFAULT_OUTPUT_DIR = Path("./edi_output")
+_FIXABLE_DENIAL_CARC_CODES = {"16"}
+_FIXABLE_DENIAL_RARC_CODES = {"N17", "N362"}
+
+
+def _payment_has_fixable_denial(payment: Payment) -> bool:
+    if payment.claim_status != "DENIED":
+        return False
+    for line in payment.service_lines or []:
+        for adjustment in line.adjustments or []:
+            if (
+                adjustment.reason
+                and adjustment.reason.code in _FIXABLE_DENIAL_CARC_CODES
+            ):
+                return True
+        if set(line.remark_codes or []) & _FIXABLE_DENIAL_RARC_CODES:
+            return True
+    return False
+
+
+def _merge_payment_dicts(
+    primary: dict[str, Any] | None, secondary: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    if not primary or not secondary:
+        return primary or secondary
+
+    merged = deepcopy(primary)
+    merged["paymentAmount"] = round(
+        float(primary.get("paymentAmount", 0))
+        + float(secondary.get("paymentAmount", 0)),
+        2,
+    )
+    if merged["paymentAmount"] > 0:
+        merged["claimStatusCode"] = "1"
+        merged["claimStatus"] = "PRIMARY"
+
+    secondary_by_line = {
+        line.get("sourceLineId"): line for line in secondary.get("serviceLines", [])
+    }
+    for line in merged.get("serviceLines", []):
+        secondary_line = secondary_by_line.get(line.get("sourceLineId"))
+        if not secondary_line:
+            continue
+        line["paidAmount"] = round(
+            float(line.get("paidAmount", 0))
+            + float(secondary_line.get("paidAmount", 0)),
+            2,
+        )
+        line["adjustments"] = (line.get("adjustments") or []) + (
+            secondary_line.get("adjustments") or []
+        )
+
+    return merged
 
 
 def generate(
@@ -312,6 +366,12 @@ def generate(
     unmatched_ar_rate: Annotated[
         float, Parameter(validator=Number(gte=0.0, lte=1.0))
     ] = 0.05,
+    revised_claim_rate: Annotated[
+        float, Parameter(validator=Number(gte=0.0, lte=1.0))
+    ] = 0.01,
+    secondary_payer_payment_rate: Annotated[
+        float, Parameter(validator=Number(gte=0.0, lte=1.0))
+    ] = 0.10,
     institutional_claim_rate: Annotated[
         float, Parameter(validator=Number(gte=0.0, lte=1.0))
     ] = 0.30,
@@ -334,6 +394,10 @@ def generate(
         output_dir: Output directory for generated files
         match_rate: Percentage of claims with matching payments, 0.0-1.0
         unmatched_ar_rate: Percentage of additional unmatched AR rows, 0.0-1.0
+        revised_claim_rate: Percentage of denied/fixable claims emitted again as
+            replacement claims
+        secondary_payer_payment_rate: Percentage of matched claims with a secondary
+            payer 835
         institutional_claim_rate: Percentage of 837 claims emitted as 837I
         seed: Random seed for reproducibility
         batch_size: Batch size for progress reporting and disk flushing
@@ -348,6 +412,8 @@ def generate(
     print(f"Generating {count:,} EDI claim/payment pairs...")
     print(f"Match rate: {match_rate:.0%}")
     print(f"Unmatched AR rate: {unmatched_ar_rate:.0%}")
+    print(f"Revised claim rate: {revised_claim_rate:.0%}")
+    print(f"Secondary payer 835 rate: {secondary_payer_payment_rate:.0%}")
     print(f"837I claim rate: {institutional_claim_rate:.0%}")
     print(f"Output directory: {output_dir}")
     if seed is not None:
@@ -370,6 +436,9 @@ def generate(
 
     ar_rows: list[dict] = []
     claim_type_counts = {"PROF": 0, "INST": 0}
+    primary_payments_written = 0
+    revised_claims_written = 0
+    secondary_payments_written = 0
 
     # Patient registry: returning patients share the same MRN, name, DoB,
     # etc. across different encounters.  MRN is stored on each context.
@@ -390,6 +459,8 @@ def generate(
         forced_icd10_codes: list[str] | None = None,
     ) -> None:
         """Generate and write all claims for one HAR group."""
+        nonlocal primary_payments_written, revised_claims_written
+        nonlocal secondary_payments_written
         har_id = openar_gen._generate_hospital_account_id()
 
         for _claim_idx in range(group_size):
@@ -421,15 +492,43 @@ def generate(
 
             # Independent payment per claim
             payment = None
+            secondary_payment = None
             if random.random() < match_rate:
-                payment = payment_gen.generate_payment_for_claim(claim)
+                has_secondary = random.random() < secondary_payer_payment_rate
+                forwarded = has_secondary and random.random() < 0.5
+                payment = payment_gen.generate_payment_for_claim(
+                    claim, forwarded=forwarded
+                )
                 payments_writer.write(payment)
+                primary_payments_written += 1
+                if has_secondary:
+                    secondary_payment = (
+                        payment_gen.generate_secondary_payment_for_claim(claim, payment)
+                    )
+                    payments_writer.write(secondary_payment)
+                    secondary_payments_written += 1
+
+                if random.random() < revised_claim_rate and _payment_has_fixable_denial(
+                    payment
+                ):
+                    revised_claim = claim_gen.generate_revised_claim(claim)
+                    claims_writer.write(revised_claim)
+                    claim_type_counts[claim_type] = (
+                        claim_type_counts.get(claim_type, 0) + 1
+                    )
+                    revised_claims_written += 1
 
             # AR rows with shared HAR ID and MRN
             claim_dict = claim.model_dump(by_alias=True, mode="json")
             payment_dict = (
                 payment.model_dump(by_alias=True, mode="json") if payment else None
             )
+            secondary_payment_dict = (
+                secondary_payment.model_dump(by_alias=True, mode="json")
+                if secondary_payment
+                else None
+            )
+            payment_dict = _merge_payment_dicts(payment_dict, secondary_payment_dict)
             claim_ar_rows = openar_gen.generate_ar_rows_for_claim(
                 claim_dict,
                 payment_dict,
@@ -545,9 +644,12 @@ def generate(
     for f in claims_writer.files_created:
         print(f"    {f}")
     print(f"  Payments written: {payments_written:,} → {n_payment_files} file(s)")
+    print(f"  Primary payments written: {primary_payments_written:,}")
+    print(f"  Revised claims written: {revised_claims_written:,}")
+    print(f"  Secondary payer payments written: {secondary_payments_written:,}")
     for f in payments_writer.files_created:
         print(f"    {f}")
-    print(f"  Match rate achieved: {payments_written / claims_written:.1%}")
+    print(f"  Match rate achieved: {primary_payments_written / count:.1%}")
     print(f"  OpenAR rows written: {len(ar_rows):,} → {openar_file}")
     print(f"    (including {unmatched_count:,} unmatched rows)")
     print(f"  HAR groups: {len(har_groups):,} ({multi_pcn_hars:,} multi-PCN)")

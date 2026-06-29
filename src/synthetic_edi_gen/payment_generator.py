@@ -32,6 +32,7 @@ from .helpers import (
     calculate_contracted_amount,
     generate_transaction_id,
 )
+from .reference_data import COMMON_PAYERS, Payer
 
 
 class PaymentGenerator:
@@ -42,7 +43,9 @@ class PaymentGenerator:
         if seed is not None:
             random.seed(seed)
 
-    def generate_payment_for_claim(self, claim: ProfClaim | InstClaim) -> Payment:
+    def generate_payment_for_claim(
+        self, claim: ProfClaim | InstClaim, forwarded: bool = False
+    ) -> Payment:
         """
         Generate a matching 835 payment for a given 837 claim.
 
@@ -82,6 +85,9 @@ class PaymentGenerator:
         if payment_scenario["type"] == "full_denial":
             claim_status_code = "2"
             claim_status = "DENIED"
+        elif forwarded:
+            claim_status_code = "19"
+            claim_status = "PRIMARY_FORWARDED"
         elif payment_scenario["type"] == "partial_payment":
             claim_status_code = "19"
             claim_status = "PRIMARY"
@@ -144,6 +150,60 @@ class PaymentGenerator:
         )
 
         return payment
+
+    def generate_secondary_payment_for_claim(
+        self, claim: ProfClaim | InstClaim, primary_payment: Payment
+    ) -> Payment:
+        """Generate a secondary payer 835 for amounts left by the primary."""
+        deny = random.random() < 0.20
+        primary_lines = {
+            line.source_line_id: line for line in primary_payment.service_lines or []
+        }
+        payment_lines: list[PaymentLine] = []
+        total_paid = 0.0
+        total_patient_responsibility = 0.0
+
+        for claim_line in claim.service_lines or []:
+            primary_line = primary_lines.get(claim_line.source_line_id)
+            payment_line = self._process_secondary_service_line(
+                claim_line, primary_line, deny=deny
+            )
+            payment_lines.append(payment_line)
+            total_paid += payment_line.paid_amount
+            for adj in payment_line.adjustments or []:
+                if adj.group == "PATIENT_RESPONSIBILITY":
+                    total_patient_responsibility += adj.amount
+
+        payment_date = primary_payment.transaction.payment_date + timedelta(
+            days=random.randint(7, 35)
+        )
+        payer_data = self._secondary_payer_data(claim)
+        payer = self._payer_party(payer_data)
+
+        return Payment(
+            id=uuid.uuid4().hex[:24],
+            object_type="PAYMENT",
+            patient_control_number=claim.patient_control_number,
+            charge_amount=float(claim.charge_amount),
+            payment_amount=float(round(total_paid, 2)),
+            facility_code=claim.facility_code,
+            frequency_code=claim.frequency_code,
+            statement_date_from=getattr(claim, "statement_date_from", None),
+            statement_date_to=getattr(claim, "statement_date_to", None),
+            service_date_from=claim.service_date_from,
+            service_date_to=claim.service_date_to,
+            claim_status_code="2",
+            claim_status="DENIED" if deny else "SECONDARY",
+            patient_responsibility_amount=float(round(total_patient_responsibility, 2)),
+            claim_filing_indicator_code=payer_data.claim_filing_code,
+            insurance_plan_type=payer_data.plan_type,
+            payer_control_number="PAYER" + claim.patient_control_number[:8] + "S",
+            payer=payer,
+            payee=claim.billing_provider,
+            patient=primary_payment.patient,
+            service_lines=payment_lines,
+            transaction=self._generate_transaction(payment_date, float(total_paid)),
+        )
 
     def _select_payment_scenario(self) -> dict[str, Any]:
         """
@@ -285,6 +345,60 @@ class PaymentGenerator:
             remark_codes=[r.code for r in remarks] if remarks else None,
         )
 
+    def _process_secondary_service_line(
+        self,
+        claim_line: ProfLine | InstLine,
+        primary_line: PaymentLine | None,
+        deny: bool,
+    ) -> PaymentLine:
+        charge_amount = float(claim_line.charge_amount)
+        primary_paid = float(primary_line.paid_amount) if primary_line else 0.0
+        unpaid_amount = max(charge_amount - primary_paid, 0.0)
+
+        if deny:
+            paid_amount = 0.0
+            adjustments = self._generate_denial_adjustments(unpaid_amount)
+            remarks = [
+                Code(
+                    sub_type="RARC",
+                    code="N428",
+                    desc="Alert: Refer to the 835 for more detail.",
+                )
+            ]
+        else:
+            paid_amount = unpaid_amount
+            if random.random() < 0.75:
+                paid_amount = round(unpaid_amount * random.uniform(0.50, 0.90), 2)
+            patient_resp = round(unpaid_amount - paid_amount, 2)
+            adjustments = []
+            if patient_resp > 0:
+                adjustments.append(
+                    Adjustment(
+                        group="PATIENT_RESPONSIBILITY",
+                        reason=Code(
+                            sub_type="CARC",
+                            code="2",
+                            desc="Coinsurance Amount",
+                        ),
+                        amount=float(patient_resp),
+                    )
+                )
+            remarks = None
+
+        return PaymentLine(
+            source_line_id=claim_line.source_line_id,
+            charge_amount=float(charge_amount),
+            paid_amount=float(round(paid_amount, 2)),
+            service_date_from=claim_line.service_date_from,
+            service_date_to=claim_line.service_date_to,
+            unit_count=claim_line.unit_count,
+            procedure=claim_line.procedure,
+            revenue_code=getattr(claim_line, "revenue_code", None),
+            adjustments=adjustments or None,
+            remarks=remarks,
+            remark_codes=[r.code for r in remarks] if remarks else None,
+        )
+
     def _generate_denial_adjustments(self, charge_amount: float) -> list[Adjustment]:
         """Generate adjustments for a denied claim."""
         # Select a denial reason
@@ -309,6 +423,26 @@ class PaymentGenerator:
         ]
 
         return adjustments
+
+    @staticmethod
+    def _secondary_payer_data(claim: ProfClaim | InstClaim) -> Payer:
+        primary_id = (
+            claim.subscriber.payer.identifier
+            if claim.subscriber and claim.subscriber.payer
+            else None
+        )
+        return random.choice([p for p in COMMON_PAYERS if p.identifier != primary_id])
+
+    @staticmethod
+    def _payer_party(payer: Payer) -> Party:
+        return Party(
+            entity_role="PAYER",
+            entity_type="BUSINESS",
+            identification_type="PAYOR_ID",
+            identifier=payer.identifier,
+            tax_id=payer.tax_id,
+            last_name_or_org_name=payer.name,
+        )
 
     def _generate_transaction(
         self, payment_date: date, total_paid: float

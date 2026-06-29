@@ -166,6 +166,51 @@ class TestPaymentLineDetails:
         for cl, pl in zip(claim.service_lines, payment.service_lines, strict=True):
             assert pl.revenue_code == cl.revenue_code
 
+    def test_secondary_payment_uses_different_payer_and_remaining_amount(self):
+        cg = ClaimGenerator(seed=42)
+        pg = PaymentGenerator(seed=42)
+        claim = cg.generate_claim()
+        primary = pg.generate_payment_for_claim(claim, forwarded=True)
+        secondary = pg.generate_secondary_payment_for_claim(claim, primary)
+
+        assert secondary.patient_control_number == claim.patient_control_number
+        assert secondary.payer.identifier != primary.payer.identifier
+        assert secondary.claim_status in ("SECONDARY", "DENIED")
+        for claim_line, primary_line, secondary_line in zip(
+            claim.service_lines,
+            primary.service_lines,
+            secondary.service_lines,
+            strict=True,
+        ):
+            unpaid = claim_line.charge_amount - primary_line.paid_amount
+            assert secondary_line.paid_amount <= unpaid
+
+    def test_forwarded_primary_payment_sets_forwarded_status(self, monkeypatch):
+        cg = ClaimGenerator(seed=42)
+        pg = PaymentGenerator(seed=42)
+        monkeypatch.setattr(
+            pg, "_select_payment_scenario", lambda: {"type": "full_payment"}
+        )
+
+        payment = pg.generate_payment_for_claim(cg.generate_claim(), forwarded=True)
+
+        assert payment.claim_status == "PRIMARY_FORWARDED"
+
+    def test_secondary_payment_can_deny_deterministically(self, monkeypatch):
+        cg = ClaimGenerator(seed=42)
+        pg = PaymentGenerator(seed=42)
+        claim = cg.generate_claim()
+        primary = pg.generate_payment_for_claim(claim)
+        monkeypatch.setattr(
+            "synthetic_edi_gen.payment_generator.random.random", lambda: 0.0
+        )
+
+        secondary = pg.generate_secondary_payment_for_claim(claim, primary)
+
+        assert secondary.claim_status == "DENIED"
+        assert secondary.payment_amount == 0.0
+        assert all(line.paid_amount == 0.0 for line in secondary.service_lines)
+
 
 class TestReproducibility:
     def test_same_seed_produces_same_payment(self):

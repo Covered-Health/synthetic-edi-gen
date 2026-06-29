@@ -521,6 +521,33 @@ class ClaimGenerator:
             ),
         )
 
+    def generate_revised_claim(
+        self, claim: ProfClaim | InstClaim
+    ) -> ProfClaim | InstClaim:
+        """Return a replacement version of an existing claim."""
+        pcn = self._generate_unique_pcn()
+        transaction_type = (
+            "institutional"
+            if claim.transaction.transaction_type == "INST"
+            else "professional"
+        )
+        return claim.model_copy(
+            deep=True,
+            update={
+                "id": str(uuid.uuid4()).replace("-", "")[:24],
+                "patient_control_number": pcn,
+                "frequency_code": Code(
+                    sub_type="FREQUENCY_CODE",
+                    code="7",
+                    desc="Replacement claim",
+                ),
+                "original_reference_number": claim.patient_control_number,
+                "transaction": self._generate_transaction(
+                    pcn, transaction_type=transaction_type
+                ),
+            },
+        )
+
     def _generate_unique_pcn(self) -> str:
         """Generate a unique patient control number."""
         while True:
