@@ -33,3 +33,22 @@ uv run synthetic-edi-gen --count 1000 --seed 42 --output-dir ./output
 - `837_claims.jsonl` — one JSON object per line, each a realistic 837P professional or 837I institutional claim
 - `835_payments.jsonl` — matching 835 payment/remittance records
 - `openar.xlsx` — OpenAR accounts receivable report correlated with claims/payments
+
+## Daily feed simulation
+
+Use the `daily-feed` command to maintain a persistent feed across simulated days:
+
+```bash
+uv run synthetic-edi-gen daily-feed \
+  --state-file ./feed-state.json \
+  --target-date 2025-06-02 \
+  --claims-per-day-min 80 \
+  --claims-per-day-max 120 \
+  --output-dir ./daily-output
+```
+
+On later runs, the command loads the state file and processes each day since the
+previous target date. It writes dated 837, 835, and OpenAR files; use
+`--claims-per-day-min` and `--claims-per-day-max` to override the default 20–50
+weekday volume, or set them equal for an exact count. Use
+`--ar-format xlsx` to produce an Excel AR snapshot instead of CSV.

@@ -538,8 +538,7 @@ def write_openar_csv(
 
     header_rows = _build_header_rows(export_datetime, len(OPENAR_COLUMNS))
 
-    df = pd.DataFrame(ar_rows)
-    df = df[OPENAR_COLUMNS]
+    df = pd.DataFrame(ar_rows, columns=OPENAR_COLUMNS)
 
     with open(output_path, "w", newline="") as f:
         writer = csv.writer(f)
@@ -576,8 +575,7 @@ def write_openar_xlsx(
     if export_datetime is None:
         export_datetime = datetime.now()  # noqa: DTZ005
 
-    df = pd.DataFrame(ar_rows)
-    df = df[OPENAR_COLUMNS]
+    df = pd.DataFrame(ar_rows, columns=OPENAR_COLUMNS)
 
     header_data = _build_header_rows(export_datetime, len(OPENAR_COLUMNS))
     header_data.append(OPENAR_COLUMNS)
