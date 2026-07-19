@@ -183,11 +183,57 @@ class TestDailyFeedGenerator:
         claims_a, _ = feed_a.process_day(date(2025, 6, 2))
         claims_b, _ = feed_b.process_day(date(2025, 6, 2))
 
-        assert len(claims_a) == len(claims_b)
-        for ca, cb in zip(claims_a, claims_b, strict=True):
-            assert ca.patient_control_number == cb.patient_control_number
-            assert ca.charge_amount == cb.charge_amount
-            assert ca.id == cb.id
+        assert [claim.model_dump_json(by_alias=True) for claim in claims_a] == [
+            claim.model_dump_json(by_alias=True) for claim in claims_b
+        ]
+
+        payments_a = []
+        payments_b = []
+        for day_offset in range(1, 21):
+            day = date(2025, 6, 2) + timedelta(days=day_offset)
+            _, daily_payments_a = feed_a.process_day(day)
+            _, daily_payments_b = feed_b.process_day(day)
+            payments_a.extend(daily_payments_a)
+            payments_b.extend(daily_payments_b)
+
+        assert payments_a
+        assert [payment.model_dump_json(by_alias=True) for payment in payments_a] == [
+            payment.model_dump_json(by_alias=True) for payment in payments_b
+        ]
+
+    def test_reversal_negates_payment_and_adjustments(self, monkeypatch):
+        state = init_state(seed=42)
+        feed = DailyFeedGenerator(state)
+        claims, _ = feed.process_day(date(2025, 6, 2))
+        monkeypatch.setattr(
+            feed._payment_gen,
+            "_select_payment_scenario",
+            lambda: {"type": "partial_payment"},
+        )
+        original = feed._payment_gen.generate_payment_for_claim(claims[0])
+
+        reversal = feed._build_reversal(original, date(2025, 6, 3))
+
+        assert original.service_lines
+        assert reversal.service_lines
+        for original_line, reversed_line in zip(
+            original.service_lines, reversal.service_lines, strict=True
+        ):
+            assert reversed_line.paid_amount == -original_line.paid_amount
+            assert original_line.adjustments
+            assert reversed_line.adjustments
+            assert [a.amount for a in reversed_line.adjustments] == [
+                -a.amount for a in original_line.adjustments
+            ]
+            assert (
+                reversed_line.model_copy(
+                    update={
+                        "paid_amount": original_line.paid_amount,
+                        "adjustments": original_line.adjustments,
+                    }
+                )
+                == original_line
+            )
 
     def test_billing_provider_is_org(self):
         state = init_state(seed=42)
@@ -262,13 +308,14 @@ class TestDailyFeedGenerator:
         state = init_state(seed=42)
         feed = DailyFeedGenerator(state)
         feed.process_day(date(2025, 6, 2))
-        state.ar_items[0].closed_date = date(2025, 6, 2)
+        closed_item = state.ar_items[0]
+        closed_item.closed_date = date(2025, 6, 2)
 
         feed._cleanup_state(date(2025, 7, 31))
-        assert state.ar_items
+        assert any(item is closed_item for item in state.ar_items)
 
         feed._cleanup_state(date(2025, 8, 1))
-        assert all(item.closed_date is None for item in state.ar_items)
+        assert not any(item is closed_item for item in state.ar_items)
 
 
 class TestDailyFeedCLI:

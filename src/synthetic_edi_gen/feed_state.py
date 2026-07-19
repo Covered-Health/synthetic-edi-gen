@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -159,4 +160,18 @@ def save_state(state: FeedState, path: Path) -> None:
     """Save feed state as JSON."""
     _require_json(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(state.model_dump_json(), encoding="utf-8")
+    temporary_path: Path | None = None
+    try:
+        with NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            temporary_file.write(state.model_dump_json())
+        temporary_path.replace(path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
