@@ -703,13 +703,15 @@ class DailyFeedGenerator:
         reversed_lines: list[PaymentLine] = []
         for line in original.service_lines or []:
             reversed_lines.append(
-                PaymentLine(
-                    source_line_id=line.source_line_id,
-                    charge_amount=line.charge_amount,
-                    paid_amount=-line.paid_amount,
-                    service_date_from=line.service_date_from,
-                    unit_count=line.unit_count,
-                    procedure=line.procedure,
+                line.model_copy(
+                    update={
+                        "paid_amount": -line.paid_amount,
+                        "adjustments": [
+                            adjustment.model_copy(update={"amount": -adjustment.amount})
+                            for adjustment in line.adjustments or []
+                        ]
+                        or None,
+                    }
                 )
             )
 
@@ -831,7 +833,7 @@ def daily_feed(
     """Generate a daily EDI feed simulating an RCM team's data dump.
 
     Produces 837 claims, 835 payment responses, and an OpenAR snapshot
-    for the target date.  State is persisted to a YAML file so that
+    for the target date.  State is persisted to a JSON file so that
     subsequent runs produce a realistic, continuous data stream.
 
     Args:
