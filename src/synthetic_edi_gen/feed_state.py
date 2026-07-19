@@ -89,6 +89,7 @@ class PendingClaimRecord(BaseModel):
     har_id: str
     mrn: str
     claim_data: dict[str, Any]
+    clearinghouse_rejection: bool = False
 
 
 class RevertCandidateRecord(BaseModel):

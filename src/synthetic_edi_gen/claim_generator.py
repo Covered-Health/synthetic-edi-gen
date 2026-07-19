@@ -8,7 +8,7 @@ import string
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Literal, cast
+from typing import Literal, TypeVar, cast
 
 from synthetic_edi_gen.edi_models import (
     Address,
@@ -57,6 +57,8 @@ from .reference_data import (
     Payer,
     PlaceOfService,
 )
+
+ClaimT = TypeVar("ClaimT", ProfClaim, InstClaim)
 
 # Fraction of (non-forced) service lines that bill an administered drug, where
 # the line carries a HCPCS J/Q-code procedure plus the drug's NDC information.
@@ -544,6 +546,30 @@ class ClaimGenerator:
                 "original_reference_number": claim.patient_control_number,
                 "transaction": self._generate_transaction(
                     pcn, transaction_type=transaction_type
+                ),
+            },
+        )
+
+    def generate_refiled_claim(self, claim: ClaimT) -> ClaimT:
+        """Refile a clearinghouse-rejected claim as an original submission."""
+        transaction_type = (
+            "institutional"
+            if claim.transaction.transaction_type == "INST"
+            else "professional"
+        )
+        return claim.model_copy(
+            deep=True,
+            update={
+                "id": str(uuid.uuid4()).replace("-", "")[:24],
+                "frequency_code": Code(
+                    sub_type="FREQUENCY_CODE",
+                    code="1",
+                    desc="Original claim",
+                ),
+                "original_reference_number": None,
+                "transaction": self._generate_transaction(
+                    claim.patient_control_number,
+                    transaction_type=transaction_type,
                 ),
             },
         )

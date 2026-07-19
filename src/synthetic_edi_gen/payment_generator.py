@@ -26,6 +26,7 @@ from .basic_codes import (
     BASIC_CARC_CODES,
     BASIC_RARC_CODES,
     DENIAL_RARC_CODES,
+    REJECTION_RARCS_BY_CARC,
 )
 from .helpers import (
     apply_adjustment,
@@ -149,6 +150,35 @@ class PaymentGenerator:
             transaction=self._generate_transaction(payment_date, float(total_paid)),
         )
 
+        return payment
+
+    def generate_rejection_for_claim(self, claim: ProfClaim | InstClaim) -> Payment:
+        """Generate a clearinghouse rejection using a recognized CARC/RARC pair."""
+        payment = self.generate_payment_for_claim(claim)
+        carc = random.choice(tuple(REJECTION_RARCS_BY_CARC))
+        rarc = random.choice(REJECTION_RARCS_BY_CARC[carc])
+
+        payment.payment_amount = 0
+        payment.patient_responsibility_amount = 0
+        payment.claim_status_code = "2"
+        payment.claim_status = "DENIED"
+        payment.transaction.total_payment_amount = 0
+        rejection_date = (claim.transaction.creation_date or date.today()) + timedelta(
+            days=random.randint(1, 2)
+        )
+        payment.transaction.payment_date = rejection_date
+        payment.transaction.production_date = rejection_date
+        for line in payment.service_lines or []:
+            line.paid_amount = 0
+            line.adjustments = [
+                Adjustment(
+                    group="CORRECTION",
+                    reason=Code(sub_type="CARC", code=carc),
+                    amount=line.charge_amount,
+                )
+            ]
+            line.remarks = [Code(sub_type="RARC", code=rarc)]
+            line.remark_codes = [rarc]
         return payment
 
     def generate_secondary_payment_for_claim(

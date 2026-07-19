@@ -2,6 +2,7 @@
 
 import json
 
+from synthetic_edi_gen.basic_codes import REJECTION_RARCS_BY_CARC
 from synthetic_edi_gen.generate import (
     SplitFileWriter,
     _merge_payment_dicts,
@@ -193,6 +194,27 @@ class TestGenerate:
             if line:
                 record = json.loads(line)
                 assert record["objectType"] == "PAYMENT"
+
+    def test_generates_clearinghouse_rejections(self, tmp_path):
+        output_dir = tmp_path / "output"
+        generate(
+            count=150,
+            output_dir=output_dir,
+            seed=42,
+            match_rate=1.0,
+            secondary_payer_payment_rate=0.0,
+        )
+
+        payments = [
+            json.loads(line) for line in _read_all_jsonl(output_dir, "835_payments")
+        ]
+        assert any(
+            line["adjustments"][0]["reason"]["code"] in REJECTION_RARCS_BY_CARC
+            and set(line.get("remarkCodes", []))
+            & set(REJECTION_RARCS_BY_CARC[line["adjustments"][0]["reason"]["code"]])
+            for payment in payments
+            for line in payment.get("serviceLines", [])
+        )
 
     def test_secondary_payer_rate_adds_extra_835s(self, tmp_path):
         output_dir = tmp_path / "output"

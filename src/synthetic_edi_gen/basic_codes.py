@@ -632,6 +632,34 @@ DENIAL_RARC_CODES = [
 # CARC codes that indicate denial (zero payment)
 DENIAL_CARC_CODES = {"16", "29", "50", "96", "97"}
 
+# CARC/RARC pairs that Protego classifies as clearinghouse rejections.
+REJECTION_RARCS_BY_CARC = {
+    "16": (
+        "MA130",
+        "N257",
+        "N256",
+        "N258",
+        "N290",
+        "N291",
+        "N265",
+        "N286",
+        "MA112",
+        "N382",
+        "MA27",
+        "MA36",
+        "MA61",
+        "M51",
+        "M20",
+        "M76",
+        "MA63",
+        "MA66",
+        "M67",
+        "M123",
+        "N350",
+    ),
+    "4": ("MA130", "N519", "M20"),
+}
+
 # Common HCPCS modifiers
 BASIC_MODIFIERS = [
     {
