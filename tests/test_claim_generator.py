@@ -137,6 +137,26 @@ class TestGenerateClaim:
         assert revised.original_reference_number == claim.patient_control_number
         assert revised.frequency_code.code == "7"
 
+    def test_generate_refiled_claim_marks_original(self, claim_generator):
+        claim = claim_generator.generate_claim()
+        refiled = claim_generator.generate_refiled_claim(claim)
+
+        assert refiled.patient_control_number == claim.patient_control_number
+        assert refiled.id != claim.id
+        assert refiled.frequency_code.code == "1"
+        assert refiled.original_reference_number is None
+
+    def test_generate_refiled_institutional_claim(self, claim_generator):
+        claim = claim_generator.generate_institutional_claim()
+        refiled = claim_generator.generate_refiled_claim(claim)
+
+        assert refiled.patient_control_number == claim.patient_control_number
+        assert refiled.frequency_code.code == "1"
+        assert refiled.transaction.transaction_type == "INST"
+        assert refiled.transaction.implementation_convention_reference == (
+            "005010X223A2"
+        )
+
     def test_claim_uses_shared_context(self, claim_generator):
         ctx = claim_generator.generate_patient_context()
         claim = claim_generator.generate_claim(ctx=ctx)

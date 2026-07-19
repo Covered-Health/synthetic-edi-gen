@@ -138,6 +138,41 @@ class TestPaymentScenarios:
                 for remark in line.remarks:
                     assert remark.sub_type == "RARC"
 
+    @pytest.mark.parametrize(("carc", "rarc"), [("16", "N257"), ("4", "N519")])
+    def test_clearinghouse_rejection_uses_each_recognized_carc_family(
+        self, monkeypatch, carc, rarc
+    ):
+        monkeypatch.setattr(
+            "synthetic_edi_gen.payment_generator.REJECTION_RARCS_BY_CARC",
+            {carc: (rarc,)},
+        )
+        claim = ClaimGenerator(seed=42).generate_claim()
+        rejection = PaymentGenerator(seed=42).generate_rejection_for_claim(claim)
+
+        assert rejection.claim_status == "DENIED"
+        assert rejection.payment_amount == 0
+        for line in rejection.service_lines or []:
+            assert line.adjustments[0].reason.code == carc
+            assert line.remark_codes == [rarc]
+        assert (
+            1
+            <= (
+                rejection.transaction.payment_date - claim.transaction.creation_date
+            ).days
+            <= 2
+        )
+
+    def test_institutional_claim_can_be_rejected(self):
+        claim = ClaimGenerator(seed=42).generate_institutional_claim()
+        rejection = PaymentGenerator(seed=42).generate_rejection_for_claim(claim)
+
+        assert rejection.statement_date_from == claim.statement_date_from
+        assert rejection.statement_date_to == claim.statement_date_to
+        for claim_line, payment_line in zip(
+            claim.service_lines or [], rejection.service_lines or [], strict=True
+        ):
+            assert payment_line.revenue_code == claim_line.revenue_code
+
 
 class TestPaymentLineDetails:
     def test_line_procedure_matches_claim_line(self, sample_claim_payment_pair):

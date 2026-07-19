@@ -1,11 +1,13 @@
 """Tests for the daily EDI feed simulation."""
 
 import json
+import random
 from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
 
+from synthetic_edi_gen.basic_codes import REJECTION_RARCS_BY_CARC
 from synthetic_edi_gen.daily_feed import (
     DailyFeedGenerator,
     _day_seed,
@@ -108,6 +110,16 @@ class TestStateRoundTrip:
         assert len(loaded.ar_items) == len(state.ar_items)
         assert loaded.last_run_date == date(2025, 6, 2)
 
+    def test_round_trip_preserves_pending_rejection(self, tmp_path: Path):
+        state = init_state(seed=42)
+        DailyFeedGenerator(state).process_day(date(2025, 6, 2))
+        state.pending_claims[0].clearinghouse_rejection = True
+
+        path = tmp_path / "state.json"
+        save_state(state, path)
+
+        assert load_state(path).pending_claims[0].clearinghouse_rejection is True
+
     def test_rejects_unknown_extension(self, tmp_path: Path):
         with pytest.raises(ValueError, match=r"\.json extension"):
             save_state(init_state(seed=42), tmp_path / "state.yaml")
@@ -173,6 +185,59 @@ class TestDailyFeedGenerator:
         }
         resolved = original_pcns - remaining_pcns
         assert len(resolved) > 0, "Some original claims should have received 835s"
+
+    def test_clearinghouse_rejection_is_refiled_then_adjudicated(self, monkeypatch):
+        state = init_state(seed=42)
+        feed = DailyFeedGenerator(state, claims_per_day_min=1, claims_per_day_max=1)
+        claims, _ = feed.process_day(date(2025, 6, 2))
+        pending = state.pending_claims[0]
+        pending.clearinghouse_rejection = True
+        pending.scheduled_response_date = date(2025, 6, 3)
+
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+        refiled, rejected = feed._process_responses(date(2025, 6, 3))
+
+        assert len(rejected) == 1
+        assert rejected[0].claim_status == "DENIED"
+        assert rejected[0].payment_amount == 0
+        for line in rejected[0].service_lines or []:
+            carc = line.adjustments[0].reason.code
+            assert set(line.remark_codes or []) & set(REJECTION_RARCS_BY_CARC[carc])
+
+        assert len(refiled) == 1
+        assert refiled[0].patient_control_number == claims[0].patient_control_number
+        assert refiled[0].frequency_code.code == "1"
+        assert refiled[0].original_reference_number is None
+        assert len(state.pending_claims) == 1
+        assert not state.pending_claims[0].clearinghouse_rejection
+        assert all(item.claim_status == "Accepted" for item in state.ar_items)
+
+        state.pending_claims[0].scheduled_response_date = date(2025, 6, 4)
+        monkeypatch.setattr(
+            feed._payment_gen,
+            "_select_payment_scenario",
+            lambda: {"type": "full_payment"},
+        )
+        further_refiles, payer_payments = feed._process_responses(date(2025, 6, 4))
+        assert further_refiles == []
+        assert payer_payments[0].claim_status == "PRIMARY"
+
+    def test_clearinghouse_rejection_may_remain_unrefiled(self, monkeypatch):
+        state = init_state(seed=42)
+        feed = DailyFeedGenerator(state, claims_per_day_min=1, claims_per_day_max=1)
+        feed.process_day(date(2025, 6, 2))
+        pending = state.pending_claims[0]
+        pending.clearinghouse_rejection = True
+        pending.scheduled_response_date = date(2025, 6, 3)
+        submitted = state.total_claims_submitted
+
+        monkeypatch.setattr(random, "random", lambda: 1.0)
+        refiled, rejected = feed._process_responses(date(2025, 6, 3))
+
+        assert refiled == []
+        assert len(rejected) == 1
+        assert state.pending_claims == []
+        assert state.total_claims_submitted == submitted
 
     def test_deterministic_across_runs(self):
         state_a = init_state(seed=42)
@@ -370,6 +435,70 @@ class TestDailyFeedCLI:
         state_2 = load_state(state_file)
         assert state_2.total_claims_submitted > submitted_1
         assert state_2.last_run_date == date(2025, 6, 3)
+
+    def test_rejection_refile_and_payer_response_are_written_across_days(
+        self, tmp_path: Path, monkeypatch
+    ):
+        state_file = tmp_path / "state.json"
+        output_dir = tmp_path / "output"
+        monkeypatch.setattr(
+            "synthetic_edi_gen.daily_feed._CLEARINGHOUSE_REJECTION_RATE", 1.0
+        )
+        monkeypatch.setattr("synthetic_edi_gen.daily_feed._REJECTED_REFILE_RATE", 1.0)
+        monkeypatch.setattr(
+            "synthetic_edi_gen.payment_generator.PaymentGenerator._select_payment_scenario",
+            lambda _self: {"type": "full_payment"},
+        )
+
+        daily_feed(
+            state_file=state_file,
+            output_dir=output_dir,
+            seed=42,
+            target_date="2025-06-02",
+            claims_per_day_min=1,
+            claims_per_day_max=1,
+        )
+        original = json.loads(
+            (output_dir / "837_claims_20250602.jsonl").read_text().strip()
+        )
+
+        daily_feed(
+            state_file=state_file,
+            output_dir=output_dir,
+            target_date="2025-06-04",
+            claims_per_day_min=0,
+            claims_per_day_max=0,
+        )
+        rejection = json.loads(
+            (output_dir / "835_payments_20250604.jsonl").read_text().strip()
+        )
+        refiled = json.loads(
+            (output_dir / "837_claims_20250604.jsonl").read_text().strip()
+        )
+
+        assert rejection["patientControlNumber"] == original["patientControlNumber"]
+        assert rejection["paymentAmount"] == 0
+        assert refiled["patientControlNumber"] == original["patientControlNumber"]
+        assert refiled["frequencyCode"]["code"] == "1"
+
+        daily_feed(
+            state_file=state_file,
+            output_dir=output_dir,
+            target_date="2025-09-12",
+            claims_per_day_min=0,
+            claims_per_day_max=0,
+        )
+        later_payments = [
+            json.loads(line)
+            for line in (output_dir / "835_payments_20250912.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        assert any(
+            payment["patientControlNumber"] == original["patientControlNumber"]
+            and payment["claimStatus"] == "PRIMARY"
+            for payment in later_payments
+        )
 
     def test_skip_already_processed(self, tmp_path: Path, capsys):
         state_file = tmp_path / "state.json"

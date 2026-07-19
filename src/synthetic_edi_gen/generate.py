@@ -305,6 +305,7 @@ class SplitFileWriter:
 
 
 _DEFAULT_OUTPUT_DIR = Path("./edi_output")
+_CLEARINGHOUSE_REJECTION_RATE = 0.05
 _FIXABLE_DENIAL_CARC_CODES = {"16"}
 _FIXABLE_DENIAL_RARC_CODES = {"N17", "N362"}
 
@@ -437,6 +438,7 @@ def generate(
     ar_rows: list[dict] = []
     claim_type_counts = {"PROF": 0, "INST": 0}
     primary_payments_written = 0
+    clearinghouse_rejections_written = 0
     revised_claims_written = 0
     secondary_payments_written = 0
 
@@ -459,7 +461,8 @@ def generate(
         forced_icd10_codes: list[str] | None = None,
     ) -> None:
         """Generate and write all claims for one HAR group."""
-        nonlocal primary_payments_written, revised_claims_written
+        nonlocal primary_payments_written, clearinghouse_rejections_written
+        nonlocal revised_claims_written
         nonlocal secondary_payments_written
         har_id = openar_gen._generate_hospital_account_id()
 
@@ -495,12 +498,21 @@ def generate(
             secondary_payment = None
             if random.random() < match_rate:
                 has_secondary = random.random() < secondary_payer_payment_rate
+                clearinghouse_rejected = (
+                    not has_secondary
+                    and random.random() < _CLEARINGHOUSE_REJECTION_RATE
+                )
                 forwarded = has_secondary and random.random() < 0.5
-                payment = payment_gen.generate_payment_for_claim(
-                    claim, forwarded=forwarded
+                payment = (
+                    payment_gen.generate_rejection_for_claim(claim)
+                    if clearinghouse_rejected
+                    else payment_gen.generate_payment_for_claim(
+                        claim, forwarded=forwarded
+                    )
                 )
                 payments_writer.write(payment)
                 primary_payments_written += 1
+                clearinghouse_rejections_written += int(clearinghouse_rejected)
                 if has_secondary:
                     secondary_payment = (
                         payment_gen.generate_secondary_payment_for_claim(claim, payment)
@@ -508,8 +520,10 @@ def generate(
                     payments_writer.write(secondary_payment)
                     secondary_payments_written += 1
 
-                if random.random() < revised_claim_rate and _payment_has_fixable_denial(
-                    payment
+                if (
+                    not clearinghouse_rejected
+                    and random.random() < revised_claim_rate
+                    and _payment_has_fixable_denial(payment)
                 ):
                     revised_claim = claim_gen.generate_revised_claim(claim)
                     claims_writer.write(revised_claim)
@@ -645,6 +659,7 @@ def generate(
         print(f"    {f}")
     print(f"  Payments written: {payments_written:,} → {n_payment_files} file(s)")
     print(f"  Primary payments written: {primary_payments_written:,}")
+    print(f"  Clearinghouse rejections: {clearinghouse_rejections_written:,}")
     print(f"  Revised claims written: {revised_claims_written:,}")
     print(f"  Secondary payer payments written: {secondary_payments_written:,}")
     for f in payments_writer.files_created:

@@ -90,6 +90,9 @@ _RESPONSE_TIME_BANDS: list[tuple[tuple[int, int], int]] = [
     ((45, 90), 5),
 ]
 
+_CLEARINGHOUSE_REJECTION_RATE = 0.05
+_REJECTED_REFILE_RATE = 0.85
+
 # ---------------------------------------------------------------------------
 # Revert parameters
 # ---------------------------------------------------------------------------
@@ -243,7 +246,9 @@ class DailyFeedGenerator:
 
         # Phase 3 — 835 responses for pending claims
         random.seed(_day_seed(self.state.seed, day_date, phase=3))
-        new_payments.extend(self._process_responses(day_date))
+        refiled_claims, response_payments = self._process_responses(day_date)
+        new_claims.extend(refiled_claims)
+        new_payments.extend(response_payments)
 
         # Phase 4 — payer reversals
         random.seed(_day_seed(self.state.seed, day_date, phase=4))
@@ -337,7 +342,12 @@ class DailyFeedGenerator:
         claim.transaction.creation_date = day_date
         claim.transaction.creation_time = time(8, 0)
 
-        response_delay = self._sample_response_delay()
+        clearinghouse_rejection = random.random() < _CLEARINGHOUSE_REJECTION_RATE
+        response_delay = (
+            random.randint(1, 2)
+            if clearinghouse_rejection
+            else self._sample_response_delay()
+        )
         har_id = "".join(random.choices(string.digits, k=11))
 
         self.state.pending_claims.append(
@@ -349,6 +359,7 @@ class DailyFeedGenerator:
                 claim_data=claim.model_dump(
                     by_alias=True, mode="json", exclude_none=True
                 ),
+                clearinghouse_rejection=clearinghouse_rejection,
             )
         )
 
@@ -587,7 +598,10 @@ class DailyFeedGenerator:
     # Phase 3 — 835 responses
     # ------------------------------------------------------------------
 
-    def _process_responses(self, day_date: date) -> list[Payment]:
+    def _process_responses(
+        self, day_date: date
+    ) -> tuple[list[ProfClaim], list[Payment]]:
+        refiled_claims: list[ProfClaim] = []
         payments: list[Payment] = []
         still_pending: list[PendingClaimRecord] = []
 
@@ -597,6 +611,27 @@ class DailyFeedGenerator:
                 continue
 
             claim = ProfClaim.model_validate(pending.claim_data)
+
+            if pending.clearinghouse_rejection:
+                payments.append(self._build_clearinghouse_rejection(claim, day_date))
+                if random.random() < _REJECTED_REFILE_RATE:
+                    refiled = self._refile_rejected_claim(claim, day_date)
+                    refiled_claims.append(refiled)
+                    still_pending.append(
+                        PendingClaimRecord(
+                            submitted_date=day_date,
+                            scheduled_response_date=day_date
+                            + timedelta(days=self._sample_response_delay()),
+                            har_id=pending.har_id,
+                            mrn=pending.mrn,
+                            claim_data=refiled.model_dump(
+                                by_alias=True, mode="json", exclude_none=True
+                            ),
+                        )
+                    )
+                    self.state.total_claims_submitted += 1
+                continue
+
             payment = self._payment_gen.generate_payment_for_claim(claim)
             payment.id = "".join(random.choices("0123456789abcdef", k=24))
             payment.transaction.payment_date = day_date
@@ -624,7 +659,28 @@ class DailyFeedGenerator:
                 )
 
         self.state.pending_claims = still_pending
-        return payments
+        return refiled_claims, payments
+
+    def _build_clearinghouse_rejection(
+        self, claim: ProfClaim, day_date: date
+    ) -> Payment:
+        """Build a zero-payment record that downstream classifies as REJECTED."""
+        payment = self._payment_gen.generate_rejection_for_claim(claim)
+        payment.id = "".join(random.choices("0123456789abcdef", k=24))
+        payment.transaction.payment_date = day_date
+        payment.transaction.production_date = day_date
+        return payment
+
+    def _refile_rejected_claim(self, claim: ProfClaim, day_date: date) -> ProfClaim:
+        """Refile a clearinghouse-rejected claim as an original submission."""
+        refiled = self._claim_gen.generate_refiled_claim(claim)
+        refiled.id = "".join(random.choices("0123456789abcdef", k=24))
+        refiled.transaction.control_number = "".join(
+            random.choices(string.ascii_uppercase + string.digits, k=8)
+        )
+        refiled.transaction.creation_date = day_date
+        refiled.transaction.creation_time = time(8, 0)
+        return refiled
 
     def _apply_payment_to_ar(self, pcn: str, payment: Payment, day_date: date) -> None:
         pmt_by_line: dict[str, PaymentLine] = {}
