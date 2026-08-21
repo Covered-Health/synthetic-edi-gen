@@ -636,7 +636,9 @@ def generate(
 
     # Write OpenAR file
     ar_ext = "csv" if ar_format == "csv" else "xlsx"
-    openar_file = output_dir / f"openar.{ar_ext}"
+    if export_datetime is None:
+        export_datetime = datetime.now()  # noqa: DTZ005
+    openar_file = output_dir / f"openar_{export_datetime:%Y%m%d}.{ar_ext}"
     print(f"  Writing OpenAR {ar_format} file...")
     if ar_format == "csv":
         write_openar_csv(ar_rows, str(openar_file), export_datetime=export_datetime)

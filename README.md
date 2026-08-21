@@ -32,7 +32,7 @@ uv run synthetic-edi-gen --count 1000 --seed 42 --output-dir ./output
 
 - `837_claims.jsonl` — one JSON object per line, each a realistic 837P professional or 837I institutional claim
 - `835_payments.jsonl` — matching 835 payment/remittance records
-- `openar.xlsx` — OpenAR accounts receivable report correlated with claims/payments
+- `openar_YYYYMMDD.xlsx` — OpenAR accounts receivable report correlated with claims/payments
 
 ## Daily feed simulation
 

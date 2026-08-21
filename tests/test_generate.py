@@ -1,6 +1,7 @@
 """Tests for synthetic_edi_gen.generate."""
 
 import json
+from datetime import datetime
 
 from synthetic_edi_gen.basic_codes import REJECTION_RARCS_BY_CARC
 from synthetic_edi_gen.generate import (
@@ -10,6 +11,8 @@ from synthetic_edi_gen.generate import (
     generate,
     write_jsonl,
 )
+
+_EXPORT_DATETIME = datetime(2025, 6, 2)
 
 
 class TestPlanHarGroups:
@@ -119,13 +122,28 @@ class TestGenerate:
         # With default splitting, files get _001 suffix
         assert (output_dir / "837_claims_001.jsonl").exists()
         assert (output_dir / "835_payments_001.jsonl").exists()
-        # Default AR format is csv
-        assert (output_dir / "openar.csv").exists()
+
+    def test_dates_csv_ar_filename_from_export_datetime(self, tmp_path):
+        output_dir = tmp_path / "output"
+        generate(
+            count=5,
+            output_dir=output_dir,
+            seed=42,
+            export_datetime=_EXPORT_DATETIME,
+        )
+
+        assert (output_dir / "openar_20250602.csv").exists()
 
     def test_creates_xlsx_when_requested(self, tmp_path):
         output_dir = tmp_path / "output"
-        generate(count=5, output_dir=output_dir, seed=42, ar_format="xlsx")
-        assert (output_dir / "openar.xlsx").exists()
+        generate(
+            count=5,
+            output_dir=output_dir,
+            seed=42,
+            ar_format="xlsx",
+            export_datetime=_EXPORT_DATETIME,
+        )
+        assert (output_dir / "openar_20250602.xlsx").exists()
 
     def test_correct_claim_count(self, tmp_path):
         count = 10
@@ -161,6 +179,7 @@ class TestGenerate:
             seed=42,
             institutional_claim_rate=0.5,
             unmatched_ar_rate=0.0,
+            export_datetime=_EXPORT_DATETIME,
         )
 
         claims = [
@@ -182,7 +201,7 @@ class TestGenerate:
 
         import csv
 
-        with open(output_dir / "openar.csv") as f:
+        with open(output_dir / "openar_20250602.csv") as f:
             rows = list(csv.DictReader(f.readlines()[9:]))
         assert any(row["Claim Form Type"] == "UB Claim" for row in rows)
 
@@ -260,8 +279,9 @@ class TestGenerate:
             output_dir=output_dir,
             seed=42,
             unmatched_ar_rate=0.10,
+            export_datetime=_EXPORT_DATETIME,
         )
-        assert (output_dir / "openar.csv").exists()
+        assert (output_dir / "openar_20250602.csv").exists()
 
     def test_seed_reproducibility(self, tmp_path):
         """Same seed produces same PCNs and charge amounts (ignoring UUIDs/timestamps)."""
@@ -315,10 +335,15 @@ class TestGenerate:
 
         output_dir = tmp_path / "output"
         # Large enough sample with a seed that triggers reuse
-        generate(count=500, output_dir=output_dir, seed=42)
+        generate(
+            count=500,
+            output_dir=output_dir,
+            seed=42,
+            export_datetime=_EXPORT_DATETIME,
+        )
 
         # Read OpenAR CSV (skip 9 header rows + 1 column header row)
-        ar_path = output_dir / "openar.csv"
+        ar_path = output_dir / "openar_20250602.csv"
         with open(ar_path) as f:
             reader = csv.reader(f)
             rows = list(reader)
