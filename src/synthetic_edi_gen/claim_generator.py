@@ -13,6 +13,8 @@ from typing import Literal, TypeVar, cast
 from synthetic_edi_gen.edi_models import (
     Address,
     Code,
+    CodeAndAmount,
+    CodeAndDate,
     InstClaim,
     InstDiagnosis,
     InstLine,
@@ -33,6 +35,10 @@ from .basic_codes import (
     BASIC_HCPCS_DRUG_CODES,
     BASIC_ICD10_CODES,
     BASIC_MODIFIERS,
+    MS_DRG_CODES,
+    UB04_CONDITION_CODES,
+    UB04_OCCURRENCE_CODES,
+    UB04_VALUE_CODES,
     BasicHCPCSDrugCode,
 )
 from .helpers import (
@@ -517,6 +523,10 @@ class ClaimGenerator:
                 ctx.rendering_provider.model_copy(update={"entity_role": "ATTENDING"})
             ],
             diags=diags,
+            drg=self._generate_drg() if is_inpatient else None,
+            conditions=self._generate_conditions(),
+            occurrences=self._generate_occurrences(svc_date),
+            value_infos=self._generate_value_infos(is_inpatient, stay_days),
             service_lines=service_lines,
             transaction=self._generate_transaction(
                 pcn, transaction_type="institutional"
@@ -857,6 +867,60 @@ class ClaimGenerator:
             else:
                 diags.append(Code(sub_type=subtype, code=code, desc=code))
         return diags
+
+    @staticmethod
+    def _generate_drg() -> Code:
+        code, desc = random.choice(MS_DRG_CODES)
+        return Code(sub_type="DRG", code=code, desc=desc)
+
+    @staticmethod
+    def _generate_conditions() -> list[Code] | None:
+        if random.random() >= 0.4:
+            return None
+        return [
+            Code(sub_type="CONDITION_CODE", code=code, desc=desc)
+            for code, desc in random.sample(UB04_CONDITION_CODES, random.randint(1, 3))
+        ]
+
+    @staticmethod
+    def _generate_occurrences(svc_date: date) -> list[CodeAndDate] | None:
+        if random.random() >= 0.5:
+            return None
+        return [
+            CodeAndDate(
+                sub_type="OCCURRENCE_CODE",
+                code=code,
+                desc=desc,
+                occurrence_date=svc_date - timedelta(days=random.randint(0, 10)),
+            )
+            for code, desc in random.sample(UB04_OCCURRENCE_CODES, random.randint(1, 2))
+        ]
+
+    @staticmethod
+    def _generate_value_infos(
+        is_inpatient: bool, stay_days: int
+    ) -> list[CodeAndAmount] | None:
+        values: list[CodeAndAmount] = []
+        if is_inpatient:
+            values.append(
+                CodeAndAmount(
+                    sub_type="VALUE_CODE",
+                    code="80",
+                    desc="Covered days",
+                    amount=float(stay_days + 1),
+                )
+            )
+        if random.random() < 0.5:
+            code, desc = random.choice(UB04_VALUE_CODES)
+            values.append(
+                CodeAndAmount(
+                    sub_type="VALUE_CODE",
+                    code=code,
+                    desc=desc,
+                    amount=random_float(25.0, 1500.0),
+                )
+            )
+        return values or None
 
     def _generate_inst_diagnoses(self, include_poa: bool) -> list[InstDiagnosis]:
         num_diags = random.randint(1, 4)

@@ -369,3 +369,32 @@ class TestDrugDefects:
                     drug_data = by_hcpcs[line.procedure.code]
                     expected = round(line.unit_count * drug_data.ndc_qty_per_unit, 3)
                     assert line.drug_quantity == expected
+
+
+class TestInstitutionalUB04Codes:
+    def test_inpatient_claims_carry_drg_and_covered_days(self):
+        gen = ClaimGenerator(seed=7)
+        inpatient = [
+            c
+            for c in (gen.generate_institutional_claim() for _ in range(50))
+            if c.admission_date_and_hour is not None
+        ]
+
+        assert inpatient
+        for claim in inpatient:
+            assert claim.drg is not None
+            assert claim.value_infos is not None
+            assert (
+                "80",
+                float((claim.statement_date_to - claim.statement_date_from).days + 1),
+            ) in [(v.code, v.amount) for v in claim.value_infos]
+
+    def test_conditions_and_occurrences_appear_across_a_batch(self):
+        gen = ClaimGenerator(seed=11)
+        claims = [gen.generate_institutional_claim() for _ in range(50)]
+
+        assert any(c.conditions for c in claims)
+        assert any(c.occurrences for c in claims)
+        for claim in claims:
+            for occurrence in claim.occurrences or []:
+                assert occurrence.occurrence_date <= claim.statement_date_to
