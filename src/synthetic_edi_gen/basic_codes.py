@@ -676,3 +676,55 @@ BASIC_MODIFIERS = [
     {"code": "LT", "description": "Left side"},
     {"code": "RT", "description": "Right side"},
 ]
+
+# UB-04 form locator 18-28 condition codes
+UB04_CONDITION_CODES = [
+    ("02", "Condition is employment related"),
+    ("04", "Information only bill"),
+    ("07", "Treatment of non-terminal condition for hospice patient"),
+    ("09", "Neither patient nor spouse is employed"),
+    ("20", "Beneficiary requested billing"),
+    ("38", "Semi-private room not available"),
+    ("40", "Same day transfer"),
+    ("41", "Partial hospitalization"),
+    ("44", "Inpatient admission changed to outpatient"),
+    ("69", "Teaching hospital IME/DGME payment request"),
+]
+
+# UB-04 form locator 31-34 occurrence codes
+UB04_OCCURRENCE_CODES = [
+    ("01", "Accident/medical coverage"),
+    ("02", "No-fault insurance involved"),
+    ("04", "Accident/employment related"),
+    ("11", "Onset of symptoms/illness"),
+    ("18", "Date of retirement patient/beneficiary"),
+    ("24", "Date insurance denied"),
+    ("25", "Date benefits terminated by primary payer"),
+    ("40", "Scheduled date of admission"),
+    ("44", "Date treatment started for physical therapy"),
+    ("55", "Date of death"),
+]
+
+# UB-04 form locator 39-41 value codes
+UB04_VALUE_CODES = [
+    ("01", "Most common semi-private rate"),
+    ("06", "Medicare blood deductible"),
+    ("14", "No-fault including auto/other"),
+    ("31", "Patient liability amount"),
+    ("50", "Physical therapy visits"),
+    ("A1", "Deductible payer A"),
+    ("A2", "Coinsurance payer A"),
+    ("B1", "Deductible payer B"),
+    ("FC", "Patient paid amount"),
+]
+
+MS_DRG_CODES = [
+    ("065", "Intracranial hemorrhage or cerebral infarction with CC"),
+    ("193", "Simple pneumonia and pleurisy with MCC"),
+    ("247", "Percutaneous cardiovascular procedures with drug-eluting stent"),
+    ("291", "Heart failure and shock with MCC"),
+    ("460", "Spinal fusion except cervical without MCC"),
+    ("470", "Major hip and knee joint replacement without MCC"),
+    ("690", "Kidney and urinary tract infections without MCC"),
+    ("871", "Septicemia or severe sepsis with MCC"),
+]
