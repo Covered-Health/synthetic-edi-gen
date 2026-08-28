@@ -5,7 +5,11 @@ from datetime import date
 
 import pytest
 
-from synthetic_edi_gen.basic_codes import BASIC_CPT_CODES, BASIC_HCPCS_DRUG_CODES
+from synthetic_edi_gen.basic_codes import (
+    BASIC_CPT_CODES,
+    BASIC_HCPCS_DRUG_CODES,
+    ICD10_PCS_PROCEDURE_CODES,
+)
 from synthetic_edi_gen.claim_generator import ClaimGenerator
 
 
@@ -398,3 +402,38 @@ class TestInstitutionalUB04Codes:
         for claim in claims:
             for occurrence in claim.occurrences or []:
                 assert occurrence.occurrence_date <= claim.statement_date_to
+
+    def test_procedures_are_an_inpatient_only_field(self):
+        gen = ClaimGenerator(seed=13)
+        claims = [gen.generate_institutional_claim() for _ in range(100)]
+        known_codes = {code for code, _ in ICD10_PCS_PROCEDURE_CODES}
+
+        with_procs = [c for c in claims if c.procs]
+        assert with_procs
+        for claim in with_procs:
+            assert claim.admission_date_and_hour is not None
+            for proc in claim.procs:
+                assert proc.sub_type == "ICD_10_PCS"
+                assert proc.code in known_codes
+                assert proc.occurrence_date >= claim.statement_date_from
+
+    def test_operating_provider_follows_a_procedure_or_outpatient_surgery(self):
+        gen = ClaimGenerator(seed=17)
+        claims = [gen.generate_institutional_claim() for _ in range(100)]
+
+        def roles(claim):
+            return {p.entity_role for p in claim.providers}
+
+        assert all("ATTENDING" in roles(c) for c in claims)
+        assert any(c.procs and "OPERATING" in roles(c) for c in claims)
+        # FL 77 without FL 74 is the outpatient surgical claim, whose procedure
+        # is billed as CPT on the service lines.
+        assert any(not c.procs and "OPERATING" in roles(c) for c in claims)
+
+        for claim in claims:
+            for provider in claim.providers:
+                if provider.entity_role != "OPERATING":
+                    continue
+                assert provider.identification_type == "NPI"
+                assert provider.identifier
+                assert "Surg" in provider.provider_taxonomy.desc

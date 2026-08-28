@@ -728,3 +728,17 @@ MS_DRG_CODES = [
     ("690", "Kidney and urinary tract infections without MCC"),
     ("871", "Septicemia or severe sepsis with MCC"),
 ]
+
+# UB-04 form locator 74 principal/other procedure codes (ICD-10-PCS)
+ICD10_PCS_PROCEDURE_CODES = [
+    ("0DTJ4ZZ", "Resection of gallbladder, percutaneous endoscopic approach"),
+    ("0SRC0J9", "Replacement of right knee joint with synthetic substitute"),
+    ("0SRD0J9", "Replacement of left knee joint with synthetic substitute"),
+    ("02703DZ", "Dilation of coronary artery with intraluminal device"),
+    ("0DTN4ZZ", "Resection of sigmoid colon, percutaneous endoscopic approach"),
+    ("0FB03ZX", "Excision of liver, percutaneous approach, diagnostic"),
+    ("0SG1071", "Fusion of lumbar vertebral joint with autologous tissue"),
+    ("0UT90ZZ", "Resection of uterus, open approach"),
+    ("0W9G3ZZ", "Drainage of peritoneal cavity, percutaneous approach"),
+    ("0BH17EZ", "Insertion of endotracheal airway into trachea"),
+]

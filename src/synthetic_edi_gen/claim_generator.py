@@ -35,6 +35,7 @@ from .basic_codes import (
     BASIC_HCPCS_DRUG_CODES,
     BASIC_ICD10_CODES,
     BASIC_MODIFIERS,
+    ICD10_PCS_PROCEDURE_CODES,
     MS_DRG_CODES,
     UB04_CONDITION_CODES,
     UB04_OCCURRENCE_CODES,
@@ -246,6 +247,8 @@ RENDERING_PROVIDER_TAXONOMIES = [
     ("104100000X", "Social Worker"),
     ("1041C0700X", "Clinical Social Worker"),
 ]
+
+SURGICAL_TAXONOMIES = [t for t in RENDERING_PROVIDER_TAXONOMIES if "Surg" in t[1]]
 
 
 @dataclass
@@ -481,6 +484,8 @@ class ClaimGenerator:
             diags = self._generate_inst_diagnoses(include_poa=is_inpatient)
 
         facility_code, patient_status = self._institutional_claim_codes(is_inpatient)
+        procs = self._generate_procs(svc_date, is_inpatient)
+        operating = self._generate_operating_provider(has_procs=procs is not None)
         admission_dt = None
         discharge_dt = None
         if is_inpatient:
@@ -520,9 +525,11 @@ class ClaimGenerator:
             patient_status_code=patient_status,
             billing_provider=ctx.institutional_billing_provider or ctx.billing_provider,
             providers=[
-                ctx.rendering_provider.model_copy(update={"entity_role": "ATTENDING"})
+                ctx.rendering_provider.model_copy(update={"entity_role": "ATTENDING"}),
+                *([operating] if operating else []),
             ],
             diags=diags,
+            procs=procs,
             drg=self._generate_drg() if is_inpatient else None,
             conditions=self._generate_conditions(),
             occurrences=self._generate_occurrences(svc_date),
@@ -895,6 +902,40 @@ class ClaimGenerator:
             )
             for code, desc in random.sample(UB04_OCCURRENCE_CODES, random.randint(1, 2))
         ]
+
+    @staticmethod
+    def _generate_procs(svc_date: date, is_inpatient: bool) -> list[CodeAndDate] | None:
+        """UB-04 FL 74. Outpatient surgery is reported as CPT on the service
+        lines instead, so an outpatient claim normally leaves this empty."""
+        if not is_inpatient or random.random() >= 0.4:
+            return None
+        return [
+            CodeAndDate(
+                sub_type="ICD_10_PCS",
+                code=code,
+                desc=desc,
+                occurrence_date=svc_date + timedelta(days=random.randint(0, 2)),
+            )
+            for code, desc in random.sample(
+                ICD10_PCS_PROCEDURE_CODES, random.randint(1, 2)
+            )
+        ]
+
+    @classmethod
+    def _generate_operating_provider(cls, *, has_procs: bool) -> Provider | None:
+        """UB-04 FL 77. Required once a surgical procedure is listed, and also
+        reported by outpatient surgical claims whose FL 74 stays empty."""
+        if random.random() >= (0.85 if has_procs else 0.15):
+            return None
+        code, desc = random.choice(SURGICAL_TAXONOMIES)
+        return cls._generate_rendering_provider().model_copy(
+            update={
+                "entity_role": "OPERATING",
+                "provider_taxonomy": Code(
+                    sub_type="PROVIDER_TAXONOMY", code=code, desc=desc
+                ),
+            }
+        )
 
     @staticmethod
     def _generate_value_infos(
