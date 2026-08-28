@@ -15,6 +15,7 @@ from synthetic_edi_gen.edi_models import (
     Code,
     CodeAndAmount,
     CodeAndDate,
+    CodeAndDateRange,
     InstClaim,
     InstDiagnosis,
     InstLine,
@@ -39,6 +40,7 @@ from .basic_codes import (
     MS_DRG_CODES,
     UB04_CONDITION_CODES,
     UB04_OCCURRENCE_CODES,
+    UB04_OCCURRENCE_SPAN_CODES,
     UB04_VALUE_CODES,
     BasicHCPCSDrugCode,
 )
@@ -533,6 +535,7 @@ class ClaimGenerator:
             drg=self._generate_drg() if is_inpatient else None,
             conditions=self._generate_conditions(),
             occurrences=self._generate_occurrences(svc_date),
+            occurrence_spans=self._generate_occurrence_spans(svc_date),
             value_infos=self._generate_value_infos(is_inpatient, stay_days),
             service_lines=service_lines,
             transaction=self._generate_transaction(
@@ -902,6 +905,30 @@ class ClaimGenerator:
             )
             for code, desc in random.sample(UB04_OCCURRENCE_CODES, random.randint(1, 2))
         ]
+
+    @staticmethod
+    def _generate_occurrence_spans(svc_date: date) -> list[CodeAndDateRange] | None:
+        """UB-04 FL 35-36. A span still open at billing time is reported with its
+        from date alone, so FL 36 is left empty on some of them."""
+        if random.random() >= 0.35:
+            return None
+        spans: list[CodeAndDateRange] = []
+        for code, desc in random.sample(
+            UB04_OCCURRENCE_SPAN_CODES, random.randint(1, 2)
+        ):
+            span_from = svc_date - timedelta(days=random.randint(3, 60))
+            spans.append(
+                CodeAndDateRange(
+                    sub_type="OCCURRENCE_SPAN_CODE",
+                    code=code,
+                    desc=desc,
+                    occurrence_date=span_from,
+                    occurrence_end_date=None
+                    if random.random() < 0.2
+                    else span_from + timedelta(days=random.randint(1, 10)),
+                )
+            )
+        return spans
 
     @staticmethod
     def _generate_procs(svc_date: date, is_inpatient: bool) -> list[CodeAndDate] | None:

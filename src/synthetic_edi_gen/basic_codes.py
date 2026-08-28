@@ -705,6 +705,20 @@ UB04_OCCURRENCE_CODES = [
     ("55", "Date of death"),
 ]
 
+# UB-04 form locator 35-36 occurrence span codes
+UB04_OCCURRENCE_SPAN_CODES = [
+    ("70", "Qualifying stay dates for SNF use only"),
+    ("71", "Prior stay dates"),
+    ("72", "First/last visit dates"),
+    ("73", "Benefit eligibility period"),
+    ("74", "Non-covered level of care/leave of absence dates"),
+    ("75", "SNF level of care dates"),
+    ("76", "Patient liability period"),
+    ("77", "Provider liability period"),
+    ("78", "SNF prior stay dates"),
+    ("M0", "QIO/UR approved stay dates"),
+]
+
 # UB-04 form locator 39-41 value codes
 UB04_VALUE_CODES = [
     ("01", "Most common semi-private rate"),

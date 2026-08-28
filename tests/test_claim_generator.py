@@ -9,6 +9,7 @@ from synthetic_edi_gen.basic_codes import (
     BASIC_CPT_CODES,
     BASIC_HCPCS_DRUG_CODES,
     ICD10_PCS_PROCEDURE_CODES,
+    UB04_OCCURRENCE_SPAN_CODES,
 )
 from synthetic_edi_gen.claim_generator import ClaimGenerator
 
@@ -416,6 +417,22 @@ class TestInstitutionalUB04Codes:
                 assert proc.sub_type == "ICD_10_PCS"
                 assert proc.code in known_codes
                 assert proc.occurrence_date >= claim.statement_date_from
+
+    def test_occurrence_spans_carry_a_range_that_can_stay_open(self):
+        gen = ClaimGenerator(seed=19)
+        claims = [gen.generate_institutional_claim() for _ in range(100)]
+        known_codes = {code for code, _ in UB04_OCCURRENCE_SPAN_CODES}
+
+        spans = [(c, s) for c in claims for s in c.occurrence_spans or []]
+        assert spans
+        # FL 36 is situational: a span still open at billing carries no through date.
+        assert any(span.occurrence_end_date is None for _, span in spans)
+        assert any(span.occurrence_end_date is not None for _, span in spans)
+        for claim, span in spans:
+            assert span.code in known_codes
+            assert span.occurrence_date <= claim.statement_date_from
+            if span.occurrence_end_date is not None:
+                assert span.occurrence_end_date > span.occurrence_date
 
     def test_operating_provider_follows_a_procedure_or_outpatient_surgery(self):
         gen = ClaimGenerator(seed=17)
