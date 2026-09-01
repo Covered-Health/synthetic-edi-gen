@@ -728,3 +728,28 @@ MS_DRG_CODES = [
     ("690", "Kidney and urinary tract infections without MCC"),
     ("871", "Septicemia or severe sepsis with MCC"),
 ]
+
+# UB-04 form locator 17 patient discharge status, with the relative frequency to
+# generate each at. Values are weights, not percentages; the code each one names
+# is spelled out because the 837I carries the bare code with no description.
+UB04_INPATIENT_DISCHARGE_STATUS = {
+    "01": 55,  # Discharged to home or self-care
+    "02": 6,  # Transferred to a short-term general hospital
+    "03": 10,  # Transferred to a skilled nursing facility
+    "06": 8,  # Discharged to organized home health care
+    "20": 4,  # Expired
+    "30": 4,  # Still a patient
+    "62": 4,  # Transferred to an inpatient rehabilitation facility
+    "63": 3,  # Transferred to a long term care hospital
+    "65": 3,  # Transferred to a psychiatric hospital or unit
+    "90": 3,  # Transferred to an IRF with a planned acute care readmission
+}
+
+UB04_OUTPATIENT_DISCHARGE_STATUS = {
+    "01": 80,  # Discharged to home or self-care
+    "02": 4,  # Transferred to a short-term general hospital
+    "06": 4,  # Discharged to organized home health care
+    "09": 8,  # Admitted as an inpatient to this hospital
+    "20": 1,  # Expired
+    "30": 3,  # Still a patient
+}
