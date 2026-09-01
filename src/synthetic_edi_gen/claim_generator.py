@@ -38,6 +38,7 @@ from .basic_codes import (
     BASIC_MODIFIERS,
     ICD10_PCS_PROCEDURE_CODES,
     MS_DRG_CODES,
+    SNF_ONLY_OCCURRENCE_SPAN_CODES,
     UB04_CONDITION_CODES,
     UB04_OCCURRENCE_CODES,
     UB04_OCCURRENCE_SPAN_CODES,
@@ -486,8 +487,11 @@ class ClaimGenerator:
             diags = self._generate_inst_diagnoses(include_poa=is_inpatient)
 
         facility_code, patient_status = self._institutional_claim_codes(is_inpatient)
-        procs = self._generate_procs(svc_date, is_inpatient)
-        operating = self._generate_operating_provider(has_procs=procs is not None)
+        procs = self._generate_procs(svc_date, statement_to, is_inpatient)
+        operating = self._generate_operating_provider(
+            has_procs=procs is not None,
+            facility=facility_code.code,
+        )
         admission_dt = None
         discharge_dt = None
         if is_inpatient:
@@ -535,7 +539,9 @@ class ClaimGenerator:
             drg=self._generate_drg() if is_inpatient else None,
             conditions=self._generate_conditions(),
             occurrences=self._generate_occurrences(svc_date),
-            occurrence_spans=self._generate_occurrence_spans(svc_date),
+            occurrence_spans=self._generate_occurrence_spans(
+                svc_date, facility_code.code
+            ),
             value_infos=self._generate_value_infos(is_inpatient, stay_days),
             service_lines=service_lines,
             transaction=self._generate_transaction(
@@ -907,15 +913,20 @@ class ClaimGenerator:
         ]
 
     @staticmethod
-    def _generate_occurrence_spans(svc_date: date) -> list[CodeAndDateRange] | None:
+    def _generate_occurrence_spans(
+        svc_date: date, facility: str
+    ) -> list[CodeAndDateRange] | None:
         """UB-04 FL 35-36. A span still open at billing time is reported with its
         from date alone, so FL 36 is left empty on some of them."""
         if random.random() >= 0.35:
             return None
+        codes = [
+            (code, desc)
+            for code, desc in UB04_OCCURRENCE_SPAN_CODES
+            if facility == "21" or code not in SNF_ONLY_OCCURRENCE_SPAN_CODES
+        ]
         spans: list[CodeAndDateRange] = []
-        for code, desc in random.sample(
-            UB04_OCCURRENCE_SPAN_CODES, random.randint(1, 2)
-        ):
+        for code, desc in random.sample(codes, random.randint(1, 2)):
             span_from = svc_date - timedelta(days=random.randint(3, 60))
             spans.append(
                 CodeAndDateRange(
@@ -931,7 +942,9 @@ class ClaimGenerator:
         return spans
 
     @staticmethod
-    def _generate_procs(svc_date: date, is_inpatient: bool) -> list[CodeAndDate] | None:
+    def _generate_procs(
+        svc_date: date, statement_to: date, is_inpatient: bool
+    ) -> list[CodeAndDate] | None:
         """UB-04 FL 74. Outpatient surgery is reported as CPT on the service
         lines instead, so an outpatient claim normally leaves this empty."""
         if not is_inpatient or random.random() >= 0.4:
@@ -941,7 +954,8 @@ class ClaimGenerator:
                 sub_type="ICD_10_PCS",
                 code=code,
                 desc=desc,
-                occurrence_date=svc_date + timedelta(days=random.randint(0, 2)),
+                occurrence_date=svc_date
+                + timedelta(days=random.randint(0, (statement_to - svc_date).days)),
             )
             for code, desc in random.sample(
                 ICD10_PCS_PROCEDURE_CODES, random.randint(1, 2)
@@ -949,10 +963,14 @@ class ClaimGenerator:
         ]
 
     @classmethod
-    def _generate_operating_provider(cls, *, has_procs: bool) -> Provider | None:
+    def _generate_operating_provider(
+        cls, *, has_procs: bool, facility: str
+    ) -> Provider | None:
         """UB-04 FL 77. Required once a surgical procedure is listed, and also
-        reported by outpatient surgical claims whose FL 74 stays empty."""
-        if random.random() >= (0.85 if has_procs else 0.15):
+        reported by outpatient surgical claims whose FL 74 stays empty. A home
+        health or SNF bill has no operating provider either way."""
+        chance = 0.85 if has_procs else (0.15 if facility == "13" else 0.0)
+        if random.random() >= chance:
             return None
         code, desc = random.choice(SURGICAL_TAXONOMIES)
         return cls._generate_rendering_provider().model_copy(

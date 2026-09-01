@@ -719,6 +719,9 @@ UB04_OCCURRENCE_SPAN_CODES = [
     ("M0", "QIO/UR approved stay dates"),
 ]
 
+# Reportable only on a SNF bill (facility type 21)
+SNF_ONLY_OCCURRENCE_SPAN_CODES = {"70", "75", "78"}
+
 # UB-04 form locator 39-41 value codes
 UB04_VALUE_CODES = [
     ("01", "Most common semi-private rate"),
@@ -745,7 +748,7 @@ MS_DRG_CODES = [
 
 # UB-04 form locator 74 principal/other procedure codes (ICD-10-PCS)
 ICD10_PCS_PROCEDURE_CODES = [
-    ("0DTJ4ZZ", "Resection of gallbladder, percutaneous endoscopic approach"),
+    ("0DTJ4ZZ", "Resection of appendix, percutaneous endoscopic approach"),
     ("0SRC0J9", "Replacement of right knee joint with synthetic substitute"),
     ("0SRD0J9", "Replacement of left knee joint with synthetic substitute"),
     ("02703DZ", "Dilation of coronary artery with intraluminal device"),
