@@ -8,7 +8,10 @@ import pytest
 from synthetic_edi_gen.basic_codes import (
     BASIC_CPT_CODES,
     BASIC_HCPCS_DRUG_CODES,
+    ICD10_PCS_PROCEDURE_CODES,
+    SNF_ONLY_OCCURRENCE_SPAN_CODES,
     UB04_INPATIENT_DISCHARGE_STATUS,
+    UB04_OCCURRENCE_SPAN_CODES,
     UB04_OUTPATIENT_DISCHARGE_STATUS,
 )
 from synthetic_edi_gen.claim_generator import ClaimGenerator
@@ -403,6 +406,80 @@ class TestInstitutionalUB04Codes:
         for claim in claims:
             for occurrence in claim.occurrences or []:
                 assert occurrence.occurrence_date <= claim.statement_date_to
+
+    def test_procedures_are_an_inpatient_only_field(self):
+        gen = ClaimGenerator(seed=13)
+        claims = [gen.generate_institutional_claim() for _ in range(100)]
+        known_codes = {code for code, _ in ICD10_PCS_PROCEDURE_CODES}
+
+        with_procs = [c for c in claims if c.procs]
+        assert with_procs
+        for claim in with_procs:
+            assert claim.admission_date_and_hour is not None
+            for proc in claim.procs:
+                assert proc.sub_type == "ICD_10_PCS"
+                assert proc.code in known_codes
+                assert (
+                    claim.statement_date_from
+                    <= proc.occurrence_date
+                    <= claim.statement_date_to
+                )
+
+        # A forced inpatient CPT bills a single day, so FL 74 has nowhere to
+        # drift to: the procedure falls on the one date the statement covers.
+        same_day = [
+            c
+            for c in (
+                gen.generate_institutional_claim(forced_cpt_codes=["47562"])
+                for _ in range(50)
+            )
+            if c.procs
+        ]
+        assert same_day
+        for claim in same_day:
+            assert claim.statement_date_to == claim.statement_date_from
+            for proc in claim.procs:
+                assert proc.occurrence_date == claim.statement_date_to
+
+    def test_occurrence_spans_carry_a_range_that_can_stay_open(self):
+        gen = ClaimGenerator(seed=19)
+        claims = [gen.generate_institutional_claim() for _ in range(100)]
+        known_codes = {code for code, _ in UB04_OCCURRENCE_SPAN_CODES}
+
+        spans = [(c, s) for c in claims for s in c.occurrence_spans or []]
+        assert spans
+        # FL 36 is situational: a span still open at billing carries no through date.
+        assert any(span.occurrence_end_date is None for _, span in spans)
+        assert any(span.occurrence_end_date is not None for _, span in spans)
+        for claim, span in spans:
+            assert span.code in known_codes
+            if claim.facility_code.code != "21":
+                assert span.code not in SNF_ONLY_OCCURRENCE_SPAN_CODES
+            assert span.occurrence_date <= claim.statement_date_from
+            if span.occurrence_end_date is not None:
+                assert span.occurrence_end_date > span.occurrence_date
+
+    def test_operating_provider_follows_a_procedure_or_outpatient_surgery(self):
+        gen = ClaimGenerator(seed=17)
+        claims = [gen.generate_institutional_claim() for _ in range(100)]
+
+        def roles(claim):
+            return {p.entity_role for p in claim.providers}
+
+        assert all("ATTENDING" in roles(c) for c in claims)
+        assert any(c.procs and "OPERATING" in roles(c) for c in claims)
+        # FL 77 without FL 74 is the outpatient surgical claim, whose procedure
+        # is billed as CPT on the service lines.
+        assert any(not c.procs and "OPERATING" in roles(c) for c in claims)
+
+        for claim in claims:
+            for provider in claim.providers:
+                if provider.entity_role != "OPERATING":
+                    continue
+                assert claim.procs or claim.facility_code.code == "13"
+                assert provider.identification_type == "NPI"
+                assert provider.identifier
+                assert "Surg" in provider.provider_taxonomy.desc
 
 
 class TestInstitutionalDischargeStatus:

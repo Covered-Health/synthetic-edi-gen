@@ -192,6 +192,14 @@ class CodeAndDate(Code):
     """
 
 
+class CodeAndDateRange(CodeAndDate):
+    occurrence_end_date: date | None = None
+    """
+    Occurrence span through date. EDI: HI01-4 under the RD8 qualifier. Absent from the
+    vendor's OpenAPI schema but present in its converted output.
+    """
+
+
 class ConditionsIndicator(EDIBaseModel):
     """
     Segment: CRC.
@@ -2226,7 +2234,7 @@ class InstClaim(EDIBaseModel):  # pyright: ignore[reportUninitializedInstanceVar
     """
     Claim-level procedures. EDI: HI.
     """
-    occurrence_spans: list[CodeAndDate] | None = None
+    occurrence_spans: list[CodeAndDateRange] | None = None
     """
     Occurrence spans. EDI: HI *BI.
     """

@@ -705,6 +705,23 @@ UB04_OCCURRENCE_CODES = [
     ("55", "Date of death"),
 ]
 
+# UB-04 form locator 35-36 occurrence span codes
+UB04_OCCURRENCE_SPAN_CODES = [
+    ("70", "Qualifying stay dates for SNF use only"),
+    ("71", "Prior stay dates"),
+    ("72", "First/last visit dates"),
+    ("73", "Benefit eligibility period"),
+    ("74", "Non-covered level of care/leave of absence dates"),
+    ("75", "SNF level of care dates"),
+    ("76", "Patient liability period"),
+    ("77", "Provider liability period"),
+    ("78", "SNF prior stay dates"),
+    ("M0", "QIO/UR approved stay dates"),
+]
+
+# Reportable only on a SNF bill (facility type 21)
+SNF_ONLY_OCCURRENCE_SPAN_CODES = {"70", "75", "78"}
+
 # UB-04 form locator 39-41 value codes
 UB04_VALUE_CODES = [
     ("01", "Most common semi-private rate"),
@@ -729,6 +746,19 @@ MS_DRG_CODES = [
     ("871", "Septicemia or severe sepsis with MCC"),
 ]
 
+# UB-04 form locator 74 principal/other procedure codes (ICD-10-PCS)
+ICD10_PCS_PROCEDURE_CODES = [
+    ("0DTJ4ZZ", "Resection of appendix, percutaneous endoscopic approach"),
+    ("0SRC0J9", "Replacement of right knee joint with synthetic substitute"),
+    ("0SRD0J9", "Replacement of left knee joint with synthetic substitute"),
+    ("02703DZ", "Dilation of coronary artery with intraluminal device"),
+    ("0DTN4ZZ", "Resection of sigmoid colon, percutaneous endoscopic approach"),
+    ("0FB03ZX", "Excision of liver, percutaneous approach, diagnostic"),
+    ("0SG1071", "Fusion of lumbar vertebral joint with autologous tissue"),
+    ("0UT90ZZ", "Resection of uterus, open approach"),
+    ("0W9G3ZZ", "Drainage of peritoneal cavity, percutaneous approach"),
+    ("0BH17EZ", "Insertion of endotracheal airway into trachea"),
+]
 # UB-04 form locator 17 patient discharge status, with the relative frequency to
 # generate each at. Values are weights, not percentages; the code each one names
 # is spelled out because the 837I carries the bare code with no description.
