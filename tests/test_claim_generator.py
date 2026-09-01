@@ -10,7 +10,9 @@ from synthetic_edi_gen.basic_codes import (
     BASIC_HCPCS_DRUG_CODES,
     ICD10_PCS_PROCEDURE_CODES,
     SNF_ONLY_OCCURRENCE_SPAN_CODES,
+    UB04_INPATIENT_DISCHARGE_STATUS,
     UB04_OCCURRENCE_SPAN_CODES,
+    UB04_OUTPATIENT_DISCHARGE_STATUS,
 )
 from synthetic_edi_gen.claim_generator import ClaimGenerator
 
@@ -478,3 +480,31 @@ class TestInstitutionalUB04Codes:
                 assert provider.identification_type == "NPI"
                 assert provider.identifier
                 assert "Surg" in provider.provider_taxonomy.desc
+
+
+class TestInstitutionalDischargeStatus:
+    def test_inpatient_and_outpatient_draw_from_their_own_pools(self):
+        gen = ClaimGenerator(seed=13)
+        claims = [gen.generate_institutional_claim() for _ in range(200)]
+        inpatient = {c.patient_status_code for c in claims if c.admission_date_and_hour}
+        outpatient = {
+            c.patient_status_code for c in claims if not c.admission_date_and_hour
+        }
+
+        assert inpatient <= set(UB04_INPATIENT_DISCHARGE_STATUS)
+        assert outpatient <= set(UB04_OUTPATIENT_DISCHARGE_STATUS)
+        assert len(inpatient) > 1
+        assert len(outpatient) > 1
+        assert "20" in inpatient | outpatient
+
+    def test_only_a_still_admitted_patient_lacks_a_discharge_time(self):
+        gen = ClaimGenerator(seed=13)
+        inpatient = [
+            c
+            for c in (gen.generate_institutional_claim() for _ in range(200))
+            if c.admission_date_and_hour is not None
+        ]
+
+        assert inpatient
+        for claim in inpatient:
+            assert (claim.discharge_time is None) == (claim.patient_status_code == "30")

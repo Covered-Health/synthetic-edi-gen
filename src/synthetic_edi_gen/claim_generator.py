@@ -40,8 +40,10 @@ from .basic_codes import (
     MS_DRG_CODES,
     SNF_ONLY_OCCURRENCE_SPAN_CODES,
     UB04_CONDITION_CODES,
+    UB04_INPATIENT_DISCHARGE_STATUS,
     UB04_OCCURRENCE_CODES,
     UB04_OCCURRENCE_SPAN_CODES,
+    UB04_OUTPATIENT_DISCHARGE_STATUS,
     UB04_VALUE_CODES,
     BasicHCPCSDrugCode,
 )
@@ -1222,15 +1224,14 @@ class ClaimGenerator:
             else [("13", "Hospital outpatient"), ("32", "Home health")]
         )
         facility_code, facility_desc = random.choice(facility_options)
-        patient_status = (
-            random.choices(
-                ["01", "02", "03", "06", "30"],
-                weights=[70, 8, 8, 7, 7],
-                k=1,
-            )[0]
+        statuses = (
+            UB04_INPATIENT_DISCHARGE_STATUS
             if is_inpatient
-            else "01"
+            else UB04_OUTPATIENT_DISCHARGE_STATUS
         )
+        patient_status = random.choices(
+            list(statuses), weights=list(statuses.values()), k=1
+        )[0]
         return (
             Code(
                 sub_type="UB_FACILITY_TYPE",
