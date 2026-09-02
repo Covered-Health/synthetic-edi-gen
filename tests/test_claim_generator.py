@@ -397,6 +397,56 @@ class TestInstitutionalUB04Codes:
                 float((claim.statement_date_to - claim.statement_date_from).days + 1),
             ) in [(v.code, v.amount) for v in claim.value_infos]
 
+    def test_admitting_diagnosis_is_an_inpatient_only_locator(self):
+        gen = ClaimGenerator(seed=23)
+        claims = [gen.generate_institutional_claim() for _ in range(100)]
+
+        def admitting(claim):
+            return [d for d in claim.diags if d.sub_type == "ICD_10_ADMITTING"]
+
+        assert any(admitting(c) for c in claims)
+        # FL 69 is situational, so an inpatient claim without one must stay possible.
+        assert any(
+            not admitting(c) for c in claims if c.admission_date_and_hour is not None
+        )
+        for claim in claims:
+            if claim.admission_date_and_hour is None:
+                assert not admitting(claim)
+                continue
+            assert len(admitting(claim)) <= 1
+            for diagnosis in admitting(claim):
+                # FL 69 has no POA field of its own.
+                assert diagnosis.present_on_admission_indicator is None
+        # The admission reason is often what the stay treats, so the code repeats.
+        assert any(
+            admitting(c) and admitting(c)[0].code == c.diags[0].code for c in claims
+        )
+
+    def test_reason_for_visit_is_an_outpatient_only_locator(self):
+        gen = ClaimGenerator(seed=29)
+        claims = [gen.generate_institutional_claim() for _ in range(100)]
+
+        def reasons(claim):
+            return [d for d in claim.diags if d.sub_type == "ICD_10_REASON_FOR_VISIT"]
+
+        assert any(reasons(c) for c in claims)
+        for claim in claims:
+            if claim.admission_date_and_hour is not None:
+                assert not reasons(claim)
+                continue
+            # UB-04 allows at most three.
+            assert len(reasons(claim)) <= 3
+            for diagnosis in reasons(claim):
+                assert diagnosis.present_on_admission_indicator is None
+
+    def test_every_institutional_claim_keeps_exactly_one_principal(self):
+        gen = ClaimGenerator(seed=31)
+
+        for claim in (gen.generate_institutional_claim() for _ in range(100)):
+            principals = [d for d in claim.diags if d.sub_type == "ICD_10_PRINCIPAL"]
+            assert len(principals) == 1
+            assert claim.diags[0].sub_type == "ICD_10_PRINCIPAL"
+
     def test_conditions_and_occurrences_appear_across_a_batch(self):
         gen = ClaimGenerator(seed=11)
         claims = [gen.generate_institutional_claim() for _ in range(50)]

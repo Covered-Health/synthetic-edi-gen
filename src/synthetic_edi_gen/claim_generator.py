@@ -487,6 +487,8 @@ class ClaimGenerator:
             )
         else:
             diags = self._generate_inst_diagnoses(include_poa=is_inpatient)
+        diags += self._generate_admitting_diagnosis(is_inpatient, diags[0])
+        diags += self._generate_reason_for_visit_diagnoses(is_inpatient)
 
         facility_code, patient_status = self._institutional_claim_codes(is_inpatient)
         procs = self._generate_procs(svc_date, statement_to, is_inpatient)
@@ -942,6 +944,42 @@ class ClaimGenerator:
                 )
             )
         return spans
+
+    @staticmethod
+    def _generate_admitting_diagnosis(
+        is_inpatient: bool, principal: InstDiagnosis
+    ) -> list[InstDiagnosis]:
+        """UB-04 FL 69. An inpatient admission reports the condition the patient
+        was admitted for; an outpatient visit uses FL 70 instead. The locator
+        carries no POA indicator of its own, and the code often repeats the
+        principal diagnosis because the admission reason is what the stay treats.
+        """
+        if not is_inpatient or random.random() >= 0.8:
+            return []
+        if random.random() < 0.5:
+            code, desc = principal.code, principal.desc
+        else:
+            icd_data = random.choice(BASIC_ICD10_CODES)
+            code, desc = icd_data.code, icd_data.description
+        return [InstDiagnosis(sub_type="ICD_10_ADMITTING", code=code, desc=desc)]
+
+    @staticmethod
+    def _generate_reason_for_visit_diagnoses(
+        is_inpatient: bool,
+    ) -> list[InstDiagnosis]:
+        """UB-04 FL 70. Up to three, reported by outpatient and emergency claims
+        to say why the patient presented; an inpatient admission uses FL 69
+        instead. No POA indicator."""
+        if is_inpatient or random.random() >= 0.5:
+            return []
+        return [
+            InstDiagnosis(
+                sub_type="ICD_10_REASON_FOR_VISIT",
+                code=icd_data.code,
+                desc=icd_data.description,
+            )
+            for icd_data in random.sample(BASIC_ICD10_CODES, random.randint(1, 3))
+        ]
 
     @staticmethod
     def _generate_procs(
