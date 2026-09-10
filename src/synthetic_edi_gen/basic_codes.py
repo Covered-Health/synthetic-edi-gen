@@ -691,6 +691,48 @@ UB04_CONDITION_CODES = [
     ("69", "Teaching hospital IME/DGME payment request"),
 ]
 
+# Reportable only on a claim shape this generator does not yet emit. Every claim
+# is payer_responsibility_sequence="PRIMARY" with other_subscribers=None, so
+# there is no payer B and no prior-payer event to report; and no bill here uses
+# a no-pay frequency code or a hospice bill type. The codes stay in their lists
+# so the deferred "deliberately invalid claims" flag only has to skip this
+# filter rather than resurrect them.
+#
+# One set per UB-04 family, not one flat set of bare codes: the families reuse
+# each other's numbers. Condition 04 is "information only bill" but occurrence
+# 04 is "accident/employment related", which is perfectly reportable here, so a
+# shared set would silently make it unreachable.
+UNSUPPORTED_CONDITION_CODES = {
+    "04",  # information only bill
+    "07",  # hospice patient, non-terminal treatment
+}
+UNSUPPORTED_OCCURRENCE_CODES = {
+    "24",  # date insurance denied
+    "25",  # date benefits terminated by primary payer
+}
+UNSUPPORTED_VALUE_CODES = {
+    "B1",  # deductible payer B
+}
+
+# Room-and-board, transfer and IPPS-payment concepts: meaningless without a stay.
+# Code 40 is load-bearing here despite also being gated on a same-day stay and a
+# transfer discharge status in `_generate_conditions`: status 02 is in the
+# outpatient weights and every outpatient claim is same-day, so both of those
+# gates pass on an outpatient bill. Removing 40 from this set puts "same day
+# transfer" on outpatient claims.
+INPATIENT_ONLY_CONDITION_CODES = {"38", "40", "69"}
+
+# Both describe a bill that is being submitted as outpatient.
+OUTPATIENT_ONLY_CONDITION_CODES = {"41", "44"}
+
+# Pairs that cannot both be true of one encounter.
+EXCLUSIVE_CONDITION_PAIRS = frozenset(
+    {
+        frozenset({"41", "44"}),  # partial hospitalization vs. admission changed
+        frozenset({"02", "09"}),  # employment related vs. neither party employed
+    }
+)
+
 # UB-04 form locator 31-34 occurrence codes
 UB04_OCCURRENCE_CODES = [
     ("01", "Accident/medical coverage"),
@@ -704,6 +746,34 @@ UB04_OCCURRENCE_CODES = [
     ("44", "Date treatment started for physical therapy"),
     ("55", "Date of death"),
 ]
+
+# FL 17 discharge statuses meaning the patient died. Occurrence 55 (date of
+# death) is reportable if and only if the status is one of these.
+#
+# Only 20 is in the weights below, so 20 is the only one the generator draws.
+# 40, 41 and 42 are the hospice-context expired statuses and this generator does
+# not emit a hospice bill — but `validate_institutional_claim` is a public entry
+# point that gets pointed at claims from elsewhere, and it must not reject a
+# real one for dying in the wrong place.
+EXPIRED_DISCHARGE_STATUSES = {
+    "20",  # expired
+    "40",  # expired at home
+    "41",  # expired in a medical facility
+    "42",  # expired, place unknown
+}
+
+# FL 17 statuses meaning the patient went to another facility. Condition 40
+# (same day transfer) requires one of these plus a zero-day stay.
+TRANSFER_DISCHARGE_STATUSES = {"02", "03", "62", "63", "65", "90"}
+
+# "Scheduled date of admission" presupposes an admission.
+INPATIENT_ONLY_OCCURRENCE_CODES = {"40"}
+
+EXCLUSIVE_OCCURRENCE_PAIRS = frozenset(
+    {
+        frozenset({"01", "04"}),  # auto/medical coverage vs. employment accident
+    }
+)
 
 # UB-04 form locator 35-36 occurrence span codes
 UB04_OCCURRENCE_SPAN_CODES = [
@@ -719,8 +789,34 @@ UB04_OCCURRENCE_SPAN_CODES = [
     ("M0", "QIO/UR approved stay dates"),
 ]
 
-# Reportable only on a SNF bill (facility type 21)
+# Reportable only on a SNF bill
 SNF_ONLY_OCCURRENCE_SPAN_CODES = {"70", "75", "78"}
+
+# A span describing an earlier encounter: it must END on or before the admission
+# date of the stay being billed, or it overlaps the stay it precedes.
+PRIOR_STAY_SPAN_CODES = {"70", "71", "78"}
+
+# A span describing part of the encounter being billed: it must fall inside
+# [statement_date_from, statement_date_to].
+WITHIN_STAY_SPAN_CODES = {"72", "74", "75", "76", "77", "M0"}
+
+# Every span except 73 describes a stay — this one or an earlier one — so none
+# of them has a referent on an outpatient bill. Code 72 (first/last visit dates)
+# is genuinely an outpatient concept on a multi-visit series bill, but every
+# outpatient claim here covers a single day, where it would collapse to a single
+# instant. Benefit eligibility (73) describes the patient's coverage rather than
+# the encounter, so it is the one span that survives on an outpatient claim.
+INPATIENT_ONLY_SPAN_CODES = {
+    "70",
+    "71",
+    "72",
+    "74",
+    "75",
+    "76",
+    "77",
+    "78",
+    "M0",
+}
 
 # UB-04 form locator 39-41 value codes
 UB04_VALUE_CODES = [
@@ -733,7 +829,13 @@ UB04_VALUE_CODES = [
     ("A2", "Coinsurance payer A"),
     ("B1", "Deductible payer B"),
     ("FC", "Patient paid amount"),
+    # Derived from the stay length rather than drawn, and reported as a count
+    # of days rather than a dollar amount.
+    ("80", "Covered days"),
 ]
+
+# A room rate and a covered-day count only mean something on a stay.
+INPATIENT_ONLY_VALUE_CODES = {"01", "80"}
 
 MS_DRG_CODES = [
     ("065", "Intracranial hemorrhage or cerebral infarction with CC"),
@@ -745,6 +847,10 @@ MS_DRG_CODES = [
     ("690", "Kidney and urinary tract infections without MCC"),
     ("871", "Septicemia or severe sepsis with MCC"),
 ]
+
+# MS-DRG is an acute inpatient prospective payment concept. A skilled nursing
+# bill is paid per diem and carries no DRG.
+ACUTE_INPATIENT_FACILITY = "11"
 
 # UB-04 form locator 74 principal/other procedure codes (ICD-10-PCS)
 ICD10_PCS_PROCEDURE_CODES = [
@@ -759,6 +865,23 @@ ICD10_PCS_PROCEDURE_CODES = [
     ("0W9G3ZZ", "Drainage of peritoneal cavity, percutaneous approach"),
     ("0BH17EZ", "Insertion of endotracheal airway into trachea"),
 ]
+
+# Procedures that are only anatomically possible on a female patient.
+FEMALE_ONLY_PCS_CODES = {"0UT90ZZ"}
+
+# UB-04 form locator 4 bill type, position 2. The facility type is what decides
+# whether a claim bills a stay, so generator and validator both read it here
+# rather than each keeping their own list.
+UB04_FACILITY_TYPES = [
+    ("11", "Hospital inpatient"),
+    ("21", "Skilled nursing inpatient"),
+    ("13", "Hospital outpatient"),
+    ("32", "Home health"),
+]
+
+INPATIENT_FACILITY_TYPES = {"11", "21"}
+SNF_FACILITY = "21"
+
 # UB-04 form locator 17 patient discharge status, with the relative frequency to
 # generate each at. Values are weights, not percentages; the code each one names
 # is spelled out because the 837I carries the bare code with no description.
