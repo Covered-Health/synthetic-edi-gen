@@ -14,7 +14,11 @@ from cyclopts.validators import Number
 from synthetic_edi_gen._base import EDIBaseModel
 from synthetic_edi_gen.edi_models import Payment
 
-from .claim_generator import ClaimGenerator, PatientContext
+from .claim_generator import (
+    ClaimGenerator,
+    PatientContext,
+    rebase_patient_context,
+)
 from .helpers import generate_service_date
 from .openar_generator import (
     OpenARGenerator,
@@ -594,7 +598,7 @@ def generate(
                             step.days_offset_min, step.days_offset_max
                         )
                         step_date = anchor + timedelta(days=offset)
-                        step_ctx = replace(ctx, base_service_date=step_date)
+                        step_ctx = rebase_patient_context(ctx, step_date)
 
                         _emit_har_group(
                             step_ctx,
@@ -607,11 +611,9 @@ def generate(
 
                 # Simple random revisit — same patient, new service date.
                 existing_ctx = random.choice(patient_registry)
-                ctx = replace(
+                ctx = rebase_patient_context(
                     existing_ctx,
-                    base_service_date=generate_service_date(
-                        days_ago_min=1, days_ago_max=90
-                    ),
+                    generate_service_date(days_ago_min=1, days_ago_max=90),
                 )
             else:
                 # New patient

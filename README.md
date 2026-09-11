@@ -34,6 +34,20 @@ uv run synthetic-edi-gen --count 1000 --seed 42 --output-dir ./output
 - `835_payments.jsonl` — matching 835 payment/remittance records
 - `openar_YYYYMMDD.xlsx` — OpenAR accounts receivable report correlated with claims/payments
 
+## Institutional claim constraints
+
+837I claims are generated so their UB-04 fields agree with each other — a date
+of death only appears alongside a discharge status that says the patient died,
+an MS-DRG only on an acute inpatient bill, and so on. The rules are listed in
+[docs/institutional-constraints.md](docs/institutional-constraints.md) and
+enforced by `validate_institutional_claim`:
+
+```python
+from synthetic_edi_gen.inst_constraints import validate_institutional_claim
+
+violations = validate_institutional_claim(claim)  # [] when the claim is consistent
+```
+
 ## Daily feed simulation
 
 Use the `daily-feed` command to maintain a persistent feed across simulated days:

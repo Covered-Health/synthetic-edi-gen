@@ -1,6 +1,7 @@
 """Tests for synthetic_edi_gen.claim_generator."""
 
 import random
+from dataclasses import replace
 from datetime import date
 
 import pytest
@@ -9,12 +10,17 @@ from synthetic_edi_gen.basic_codes import (
     BASIC_CPT_CODES,
     BASIC_HCPCS_DRUG_CODES,
     ICD10_PCS_PROCEDURE_CODES,
+    PRIOR_STAY_SPAN_CODES,
     SNF_ONLY_OCCURRENCE_SPAN_CODES,
     UB04_INPATIENT_DISCHARGE_STATUS,
     UB04_OCCURRENCE_SPAN_CODES,
     UB04_OUTPATIENT_DISCHARGE_STATUS,
+    WITHIN_STAY_SPAN_CODES,
 )
-from synthetic_edi_gen.claim_generator import ClaimGenerator
+from synthetic_edi_gen.claim_generator import (
+    ClaimGenerator,
+    rebase_patient_context,
+)
 
 
 class TestClaimGeneratorReproducibility:
@@ -65,6 +71,28 @@ class TestGeneratePatientContext:
         custom_date = date(2025, 6, 15)
         ctx = claim_generator.generate_patient_context(service_date=custom_date)
         assert ctx.base_service_date == custom_date
+
+    def test_rebase_moves_the_encounter_not_the_birth_date(self, claim_generator):
+        """`generate.py` replays one context at dates months before the one it
+        was built for. A patient born this year would be billed before they
+        existed, so the encounter moves up to the birth date — ageing the
+        patient instead would put two dates of birth on one member id."""
+        ctx = claim_generator.generate_patient_context(service_date=date(2026, 6, 1))
+        newborn = replace(ctx, patient_dob=date(2026, 5, 20))
+
+        replayed = rebase_patient_context(newborn, date(2026, 1, 15))
+
+        assert replayed.patient_dob == newborn.patient_dob
+        assert replayed.base_service_date == newborn.patient_dob
+
+    def test_rebase_leaves_a_reachable_date_alone(self, claim_generator):
+        ctx = claim_generator.generate_patient_context(service_date=date(2026, 6, 1))
+        adult = replace(ctx, patient_dob=date(1980, 3, 4))
+
+        replayed = rebase_patient_context(adult, date(2026, 1, 15))
+
+        assert replayed.base_service_date == date(2026, 1, 15)
+        assert replayed.patient_dob == adult.patient_dob
 
 
 class TestGenerateClaim:
@@ -390,7 +418,12 @@ class TestInstitutionalUB04Codes:
 
         assert inpatient
         for claim in inpatient:
-            assert claim.drg is not None
+            # MS-DRG drives acute inpatient prospective payment. A skilled
+            # nursing stay (facility 21) is paid per diem and carries no DRG.
+            if claim.facility_code.code == "11":
+                assert claim.drg is not None
+            else:
+                assert claim.drg is None
             assert claim.value_infos is not None
             assert (
                 "80",
@@ -505,9 +538,23 @@ class TestInstitutionalUB04Codes:
             assert span.code in known_codes
             if claim.facility_code.code != "21":
                 assert span.code not in SNF_ONLY_OCCURRENCE_SPAN_CODES
-            assert span.occurrence_date <= claim.statement_date_from
             if span.occurrence_end_date is not None:
-                assert span.occurrence_end_date > span.occurrence_date
+                assert span.occurrence_end_date >= span.occurrence_date
+
+            if span.code in PRIOR_STAY_SPAN_CODES:
+                # A prior stay has to be over before this one begins, so it is
+                # the through date that matters, not just the from date.
+                assert span.occurrence_date <= claim.statement_date_from
+                if span.occurrence_end_date is not None:
+                    assert span.occurrence_end_date <= claim.statement_date_from
+            elif span.code in WITHIN_STAY_SPAN_CODES:
+                assert (
+                    claim.statement_date_from
+                    <= span.occurrence_date
+                    <= claim.statement_date_to
+                )
+                if span.occurrence_end_date is not None:
+                    assert span.occurrence_end_date <= claim.statement_date_to
 
     def test_operating_provider_follows_a_procedure_or_outpatient_surgery(self):
         gen = ClaimGenerator(seed=17)

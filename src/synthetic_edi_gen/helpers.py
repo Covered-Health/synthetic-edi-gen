@@ -49,7 +49,9 @@ def generate_birth_date(min_age: int = 18, max_age: int = 85) -> date:
     days_offset = random.randint(0, 365)
     birth_year = today.year - years_ago
     birth_date = date(birth_year, 1, 1) + timedelta(days=days_offset)
-    return birth_date
+    # At min_age=0 the offset can land later in the current year than today.
+    # Nobody is born in the future.
+    return min(birth_date, today)
 
 
 def generate_address() -> Address:

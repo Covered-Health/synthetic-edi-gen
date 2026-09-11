@@ -6,7 +6,7 @@ Generate realistic 837P professional and 837I institutional claims.
 import random
 import string
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal, TypeVar, cast
 
@@ -32,19 +32,38 @@ from synthetic_edi_gen.edi_models import (
 )
 
 from .basic_codes import (
+    ACUTE_INPATIENT_FACILITY,
     BASIC_CPT_CODES,
     BASIC_HCPCS_DRUG_CODES,
     BASIC_ICD10_CODES,
     BASIC_MODIFIERS,
+    EXCLUSIVE_CONDITION_PAIRS,
+    EXCLUSIVE_OCCURRENCE_PAIRS,
+    EXPIRED_DISCHARGE_STATUSES,
+    FEMALE_ONLY_PCS_CODES,
     ICD10_PCS_PROCEDURE_CODES,
+    INPATIENT_FACILITY_TYPES,
+    INPATIENT_ONLY_CONDITION_CODES,
+    INPATIENT_ONLY_OCCURRENCE_CODES,
+    INPATIENT_ONLY_SPAN_CODES,
+    INPATIENT_ONLY_VALUE_CODES,
     MS_DRG_CODES,
+    OUTPATIENT_ONLY_CONDITION_CODES,
+    PRIOR_STAY_SPAN_CODES,
+    SNF_FACILITY,
     SNF_ONLY_OCCURRENCE_SPAN_CODES,
+    TRANSFER_DISCHARGE_STATUSES,
     UB04_CONDITION_CODES,
+    UB04_FACILITY_TYPES,
     UB04_INPATIENT_DISCHARGE_STATUS,
     UB04_OCCURRENCE_CODES,
     UB04_OCCURRENCE_SPAN_CODES,
     UB04_OUTPATIENT_DISCHARGE_STATUS,
     UB04_VALUE_CODES,
+    UNSUPPORTED_CONDITION_CODES,
+    UNSUPPORTED_OCCURRENCE_CODES,
+    UNSUPPORTED_VALUE_CODES,
+    WITHIN_STAY_SPAN_CODES,
     BasicHCPCSDrugCode,
 )
 from .helpers import (
@@ -71,6 +90,21 @@ from .reference_data import (
 )
 
 ClaimT = TypeVar("ClaimT", ProfClaim, InstClaim)
+T = TypeVar("T")
+
+# Procedures that put a patient in a bed. A forced CPT outside this set bills an
+# outpatient encounter, however the claim type would otherwise have been drawn.
+_INPATIENT_CPT_CODES = {"27447", "47562", "29881", "49505"}
+
+# Share of inpatient stays admitted and discharged on the same calendar day.
+_SAME_DAY_STAY_RATE = 0.05
+
+# How often a claim reports occurrence spans at all. Outpatient bills are gated
+# lower because 73 is the only span reportable on one: at the inpatient rate,
+# every outpatient claim that passed the gate would emit a 73 and that single
+# code would be the majority of all spans generated.
+_SPAN_REPORT_RATE = 0.35
+_OUTPATIENT_SPAN_REPORT_RATE = 0.08
 
 # Fraction of (non-forced) service lines that bill an administered drug, where
 # the line carries a HCPCS J/Q-code procedure plus the drug's NDC information.
@@ -288,6 +322,56 @@ class PatientContext:
     pos: PlaceOfService = field(default_factory=lambda: random.choice(PLACE_OF_SERVICE))
 
 
+@dataclass(frozen=True)
+class _Encounter:
+    """What every UB-04 code helper needs to know about the encounter.
+
+    UB-04 fields constrain each other, so the helpers that pick conditions,
+    occurrences, spans, value codes and procedures cannot draw independently —
+    each needs the claim type, the discharge status and the statement period
+    already chosen upstream. Same parameter-object idea as ``PatientContext``,
+    scoped to one institutional claim instead of a HAR group.
+    """
+
+    is_inpatient: bool
+    facility: str
+    patient_status: str
+    statement_from: date
+    statement_to: date
+    patient_gender: Gender
+    patient_dob: date
+
+    @property
+    def stay_days(self) -> int:
+        """Nights billed: 0 on a same-day stay and on every outpatient claim."""
+        return (self.statement_to - self.statement_from).days
+
+    @property
+    def is_same_day(self) -> bool:
+        return self.statement_from == self.statement_to
+
+    @property
+    def is_expired(self) -> bool:
+        return self.patient_status in EXPIRED_DISCHARGE_STATUSES
+
+    def clamp(self, day: date) -> date:
+        """Keep a generated date on or after the patient was born."""
+        return max(day, self.patient_dob)
+
+
+def rebase_patient_context(ctx: PatientContext, service_date: date) -> PatientContext:
+    """Point a reused patient at a different encounter date.
+
+    A returning patient's context is built for one date and then replayed at
+    others — an encounter sequence can place a step months earlier than the
+    anchor — which for a patient born this year would bill a visit from before
+    they existed. The encounter moves up to the birth date rather than the birth
+    date moving back to the encounter, so one patient keeps one date of birth
+    across every claim they appear on.
+    """
+    return replace(ctx, base_service_date=max(service_date, ctx.patient_dob))
+
+
 class ClaimGenerator:
     """Generator for 837P professional claims."""
 
@@ -315,12 +399,17 @@ class ClaimGenerator:
         to the same HAR group share identical demographics.
         """
         payer_info = random.choice(COMMON_PAYERS)
+        base_service_date = service_date or generate_service_date(
+            days_ago_min=1, days_ago_max=90
+        )
 
         patient_gender = cast(Gender, generate_gender())
         patient_first, patient_last, patient_middle = generate_person_name(
             patient_gender
         )
-        patient_dob = generate_birth_date(min_age=0, max_age=85)
+        # A newborn's birth date can otherwise fall after the encounter it is
+        # being billed for.
+        patient_dob = min(generate_birth_date(min_age=0, max_age=85), base_service_date)
         patient_address = generate_address()
 
         is_self = random.random() < 0.7
@@ -361,8 +450,7 @@ class ClaimGenerator:
             billing_provider=self._generate_billing_provider(),
             institutional_billing_provider=self._generate_institutional_billing_provider(),
             rendering_provider=self._generate_rendering_provider(),
-            base_service_date=service_date
-            or generate_service_date(days_ago_min=1, days_ago_max=90),
+            base_service_date=base_service_date,
         )
 
     def generate_claim(
@@ -470,7 +558,15 @@ class ClaimGenerator:
         pcn = self._generate_unique_pcn()
         svc_date = service_date or ctx.base_service_date
         is_inpatient = self._is_inpatient_inst_claim(forced_cpt_codes)
-        stay_days = random.randint(1, 5) if is_inpatient and not forced_cpt_codes else 0
+        # A same-day admit/discharge is real, and it is the only shape in which
+        # condition 40 (same day transfer) can be reported — but it is uncommon.
+        # A flat randint(0, 5) would make one inpatient stay in six a zero-night
+        # stay, which is not a length-of-stay distribution anyone would believe.
+        stay_days = (
+            (0 if random.random() < _SAME_DAY_STAY_RATE else random.randint(1, 5))
+            if is_inpatient and not forced_cpt_codes
+            else 0
+        )
         statement_to = svc_date + timedelta(days=stay_days)
 
         service_lines = self._generate_institutional_service_lines(
@@ -491,7 +587,17 @@ class ClaimGenerator:
         diags += self._generate_reason_for_visit_diagnoses(is_inpatient)
 
         facility_code, patient_status = self._institutional_claim_codes(is_inpatient)
-        procs = self._generate_procs(svc_date, statement_to, is_inpatient)
+        enc = _Encounter(
+            is_inpatient=is_inpatient,
+            facility=facility_code.code,
+            patient_status=patient_status,
+            statement_from=svc_date,
+            statement_to=statement_to,
+            patient_gender=ctx.patient_gender,
+            patient_dob=ctx.patient_dob,
+        )
+
+        procs = self._generate_procs(enc)
         operating = self._generate_operating_provider(
             has_procs=procs is not None,
             facility=facility_code.code,
@@ -499,9 +605,12 @@ class ClaimGenerator:
         admission_dt = None
         discharge_dt = None
         if is_inpatient:
-            admission_dt = self._aware_datetime(svc_date, random.randint(0, 23))
+            admission_hour, discharge_hour = self._admission_discharge_hours(
+                same_day=enc.is_same_day
+            )
+            admission_dt = self._aware_datetime(svc_date, admission_hour)
             if patient_status != "30":
-                discharge_dt = self._aware_datetime(statement_to, random.randint(8, 18))
+                discharge_dt = self._aware_datetime(statement_to, discharge_hour)
 
         return InstClaim(
             id=str(uuid.uuid4()).replace("-", "")[:24],
@@ -540,13 +649,11 @@ class ClaimGenerator:
             ],
             diags=diags,
             procs=procs,
-            drg=self._generate_drg() if is_inpatient else None,
-            conditions=self._generate_conditions(),
-            occurrences=self._generate_occurrences(svc_date),
-            occurrence_spans=self._generate_occurrence_spans(
-                svc_date, facility_code.code
-            ),
-            value_infos=self._generate_value_infos(is_inpatient, stay_days),
+            drg=self._generate_drg(enc),
+            conditions=self._generate_conditions(enc),
+            occurrences=self._generate_occurrences(enc),
+            occurrence_spans=self._generate_occurrence_spans(enc),
+            value_infos=self._generate_value_infos(enc),
             service_lines=service_lines,
             transaction=self._generate_transaction(
                 pcn, transaction_type="institutional"
@@ -889,61 +996,178 @@ class ClaimGenerator:
         return diags
 
     @staticmethod
-    def _generate_drg() -> Code:
+    def _sample(pool: list[T], most: int) -> list[T]:
+        """Draw 1..most distinct entries, never asking for more than exist.
+
+        Every UB-04 pool below is filtered down by claim type before sampling,
+        so the requested count has to be clamped or ``random.sample`` raises.
+        """
+        return random.sample(pool, random.randint(1, min(most, len(pool))))
+
+    @staticmethod
+    def _drop_exclusive(
+        picked: list[tuple[str, str]],
+        pairs: frozenset[frozenset[str]],
+    ) -> list[tuple[str, str]]:
+        """Drop the later member of any mutually exclusive pair.
+
+        Filtering the pool up front cannot express this: ``random.sample``
+        guarantees distinctness, not compatibility, so conflicts are resolved
+        after the draw rather than by retrying it.
+        """
+        kept: list[tuple[str, str]] = []
+        kept_codes: set[str] = set()
+        for code, desc in picked:
+            if any(pair <= kept_codes | {code} for pair in pairs if code in pair):
+                continue
+            kept.append((code, desc))
+            kept_codes.add(code)
+        return kept
+
+    @staticmethod
+    def _generate_drg(enc: _Encounter) -> Code | None:
+        """UB-04 FL 71."""
+        if enc.facility != ACUTE_INPATIENT_FACILITY:
+            return None
         code, desc = random.choice(MS_DRG_CODES)
         return Code(sub_type="DRG", code=code, desc=desc)
 
-    @staticmethod
-    def _generate_conditions() -> list[Code] | None:
+    @classmethod
+    def _generate_conditions(cls, enc: _Encounter) -> list[Code] | None:
+        """UB-04 FL 18-28."""
         if random.random() >= 0.4:
             return None
+        excluded = set(UNSUPPORTED_CONDITION_CODES)
+        excluded |= (
+            OUTPATIENT_ONLY_CONDITION_CODES
+            if enc.is_inpatient
+            else INPATIENT_ONLY_CONDITION_CODES
+        )
+        # A same day transfer needs both a zero-day stay and somewhere to go.
+        if not (enc.is_same_day and enc.patient_status in TRANSFER_DISCHARGE_STATUSES):
+            excluded.add("40")
+
+        pool = [c for c in UB04_CONDITION_CODES if c[0] not in excluded]
+        if not pool:
+            return None
+        picked = cls._drop_exclusive(cls._sample(pool, 3), EXCLUSIVE_CONDITION_PAIRS)
         return [
             Code(sub_type="CONDITION_CODE", code=code, desc=desc)
-            for code, desc in random.sample(UB04_CONDITION_CODES, random.randint(1, 3))
-        ]
+            for code, desc in picked
+        ] or None
 
-    @staticmethod
-    def _generate_occurrences(svc_date: date) -> list[CodeAndDate] | None:
-        if random.random() >= 0.5:
+    @classmethod
+    def _generate_occurrences(cls, enc: _Encounter) -> list[CodeAndDate] | None:
+        """UB-04 FL 31-34.
+
+        Occurrence 55 is a biconditional rather than a filter: a patient who
+        died must carry it and a patient who did not must not, so it is placed
+        before the random gate that decides whether to report anything at all.
+        """
+        excluded = set(UNSUPPORTED_OCCURRENCE_CODES) | {"55"}
+        if not enc.is_inpatient:
+            excluded |= INPATIENT_ONLY_OCCURRENCE_CODES
+
+        picked: list[tuple[str, str]] = []
+        if enc.is_expired:
+            picked.append(("55", "Date of death"))
+
+        if random.random() < 0.5:
+            pool = [c for c in UB04_OCCURRENCE_CODES if c[0] not in excluded]
+            if pool:
+                picked += cls._sample(pool, 2)
+        picked = cls._drop_exclusive(picked, EXCLUSIVE_OCCURRENCE_PAIRS)
+        if not picked:
             return None
+
         return [
             CodeAndDate(
                 sub_type="OCCURRENCE_CODE",
                 code=code,
                 desc=desc,
-                occurrence_date=svc_date - timedelta(days=random.randint(0, 10)),
+                occurrence_date=cls._occurrence_date(code, enc),
             )
-            for code, desc in random.sample(UB04_OCCURRENCE_CODES, random.randint(1, 2))
+            for code, desc in picked
         ]
 
     @staticmethod
+    def _occurrence_date(code: str, enc: _Encounter) -> date:
+        """Date an occurrence according to what the code actually means."""
+        if code == "55":
+            # Death ends the stay, so it is dated at the statement through date.
+            return enc.statement_to
+        if code == "40":
+            # A scheduled admission is scheduled before it happens.
+            return enc.clamp(enc.statement_from - timedelta(days=random.randint(0, 14)))
+        return enc.clamp(enc.statement_from - timedelta(days=random.randint(0, 10)))
+
+    @classmethod
     def _generate_occurrence_spans(
-        svc_date: date, facility: str
+        cls, enc: _Encounter
     ) -> list[CodeAndDateRange] | None:
         """UB-04 FL 35-36. A span still open at billing time is reported with its
         from date alone, so FL 36 is left empty on some of them."""
-        if random.random() >= 0.35:
+        report_rate = (
+            _SPAN_REPORT_RATE if enc.is_inpatient else _OUTPATIENT_SPAN_REPORT_RATE
+        )
+        if random.random() >= report_rate:
             return None
-        codes = [
-            (code, desc)
-            for code, desc in UB04_OCCURRENCE_SPAN_CODES
-            if facility == "21" or code not in SNF_ONLY_OCCURRENCE_SPAN_CODES
-        ]
+        excluded: set[str] = set()
+        if enc.facility != SNF_FACILITY:
+            excluded |= SNF_ONLY_OCCURRENCE_SPAN_CODES
+        if not enc.is_inpatient:
+            excluded |= INPATIENT_ONLY_SPAN_CODES
+
+        pool = [c for c in UB04_OCCURRENCE_SPAN_CODES if c[0] not in excluded]
+        if not pool:
+            return None
+
         spans: list[CodeAndDateRange] = []
-        for code, desc in random.sample(codes, random.randint(1, 2)):
-            span_from = svc_date - timedelta(days=random.randint(3, 60))
+        for code, desc in cls._sample(pool, 2):
+            span_from, span_to = cls._span_dates(code, enc)
             spans.append(
                 CodeAndDateRange(
                     sub_type="OCCURRENCE_SPAN_CODE",
                     code=code,
                     desc=desc,
                     occurrence_date=span_from,
-                    occurrence_end_date=None
-                    if random.random() < 0.2
-                    else span_from + timedelta(days=random.randint(1, 10)),
+                    occurrence_end_date=None if random.random() < 0.2 else span_to,
                 )
             )
         return spans
+
+    @staticmethod
+    def _span_dates(code: str, enc: _Encounter) -> tuple[date, date]:
+        """Place a span in time according to what the code describes.
+
+        A prior stay has to be over before this one starts; a span describing
+        part of this encounter has to fall inside the statement period. The
+        statement period collapses to a single day on a same-day claim, so both
+        ends are clamped rather than offset blindly.
+        """
+        if code in PRIOR_STAY_SPAN_CODES:
+            span_from = enc.clamp(
+                enc.statement_from - timedelta(days=random.randint(3, 60))
+            )
+            span_to = min(
+                span_from + timedelta(days=random.randint(1, 10)),
+                enc.statement_from,
+            )
+            return span_from, span_to
+        if code in WITHIN_STAY_SPAN_CODES:
+            span_from = enc.statement_from + timedelta(
+                days=random.randint(0, enc.stay_days)
+            )
+            span_to = min(
+                span_from + timedelta(days=random.randint(0, enc.stay_days)),
+                enc.statement_to,
+            )
+            return span_from, span_to
+        # Benefit eligibility (73) is not tied to this encounter's dates.
+        span_from = enc.clamp(
+            enc.statement_from - timedelta(days=random.randint(3, 60))
+        )
+        return span_from, span_from + timedelta(days=random.randint(1, 10))
 
     @staticmethod
     def _generate_admitting_diagnosis(
@@ -981,25 +1205,28 @@ class ClaimGenerator:
             for icd_data in random.sample(BASIC_ICD10_CODES, random.randint(1, 3))
         ]
 
-    @staticmethod
-    def _generate_procs(
-        svc_date: date, statement_to: date, is_inpatient: bool
-    ) -> list[CodeAndDate] | None:
+    @classmethod
+    def _generate_procs(cls, enc: _Encounter) -> list[CodeAndDate] | None:
         """UB-04 FL 74. Outpatient surgery is reported as CPT on the service
         lines instead, so an outpatient claim normally leaves this empty."""
-        if not is_inpatient or random.random() >= 0.4:
+        if not enc.is_inpatient or random.random() >= 0.4:
+            return None
+        pool = [
+            c
+            for c in ICD10_PCS_PROCEDURE_CODES
+            if enc.patient_gender == "FEMALE" or c[0] not in FEMALE_ONLY_PCS_CODES
+        ]
+        if not pool:
             return None
         return [
             CodeAndDate(
                 sub_type="ICD_10_PCS",
                 code=code,
                 desc=desc,
-                occurrence_date=svc_date
-                + timedelta(days=random.randint(0, (statement_to - svc_date).days)),
+                occurrence_date=enc.statement_from
+                + timedelta(days=random.randint(0, enc.stay_days)),
             )
-            for code, desc in random.sample(
-                ICD10_PCS_PROCEDURE_CODES, random.randint(1, 2)
-            )
+            for code, desc in cls._sample(pool, 2)
         ]
 
     @classmethod
@@ -1023,29 +1250,36 @@ class ClaimGenerator:
         )
 
     @staticmethod
-    def _generate_value_infos(
-        is_inpatient: bool, stay_days: int
-    ) -> list[CodeAndAmount] | None:
+    def _generate_value_infos(enc: _Encounter) -> list[CodeAndAmount] | None:
+        """UB-04 FL 39-41."""
         values: list[CodeAndAmount] = []
-        if is_inpatient:
+        if enc.is_inpatient:
             values.append(
                 CodeAndAmount(
                     sub_type="VALUE_CODE",
                     code="80",
                     desc="Covered days",
-                    amount=float(stay_days + 1),
+                    amount=float(enc.stay_days + 1),
                 )
             )
         if random.random() < 0.5:
-            code, desc = random.choice(UB04_VALUE_CODES)
-            values.append(
-                CodeAndAmount(
-                    sub_type="VALUE_CODE",
-                    code=code,
-                    desc=desc,
-                    amount=random_float(25.0, 1500.0),
+            excluded = set(UNSUPPORTED_VALUE_CODES)
+            # A value code is reported once, and covered days is already derived
+            # from the stay length above rather than drawn with a dollar amount.
+            excluded |= {v.code for v in values}
+            if not enc.is_inpatient:
+                excluded |= INPATIENT_ONLY_VALUE_CODES
+            pool = [c for c in UB04_VALUE_CODES if c[0] not in excluded]
+            if pool:
+                code, desc = random.choice(pool)
+                values.append(
+                    CodeAndAmount(
+                        sub_type="VALUE_CODE",
+                        code=code,
+                        desc=desc,
+                        amount=random_float(25.0, 1500.0),
+                    )
                 )
-            )
         return values or None
 
     def _generate_inst_diagnoses(self, include_poa: bool) -> list[InstDiagnosis]:
@@ -1245,22 +1479,36 @@ class ClaimGenerator:
 
     @staticmethod
     def _is_inpatient_inst_claim(forced_cpt_codes: list[str] | None) -> bool:
-        if forced_cpt_codes and set(forced_cpt_codes) & {
-            "27447",
-            "47562",
-            "29881",
-            "49505",
-        }:
-            return True
+        """Decide whether an institutional claim bills a stay.
+
+        When the caller forces the procedure codes, the codes decide: an
+        inpatient bill whose only service line is an office visit, with no room
+        and board charge, is not a claim any hospital would send.
+        """
+        if forced_cpt_codes:
+            return bool(set(forced_cpt_codes) & _INPATIENT_CPT_CODES)
         return random.random() < 0.35
 
     @staticmethod
+    def _admission_discharge_hours(*, same_day: bool) -> tuple[int, int]:
+        """Pick admission and discharge hours that stay in order.
+
+        On a multi-day stay the two hours sit on different dates and cannot
+        cross. On a same-day stay they share a date, so the discharge hour is
+        drawn first and the admission hour placed before it.
+        """
+        discharge_hour = random.randint(8, 18)
+        if same_day:
+            return random.randint(0, discharge_hour - 1), discharge_hour
+        return random.randint(0, 23), discharge_hour
+
+    @staticmethod
     def _institutional_claim_codes(is_inpatient: bool) -> tuple[Code, str]:
-        facility_options = (
-            [("11", "Hospital inpatient"), ("21", "Skilled nursing inpatient")]
-            if is_inpatient
-            else [("13", "Hospital outpatient"), ("32", "Home health")]
-        )
+        facility_options = [
+            f
+            for f in UB04_FACILITY_TYPES
+            if (f[0] in INPATIENT_FACILITY_TYPES) is is_inpatient
+        ]
         facility_code, facility_desc = random.choice(facility_options)
         statuses = (
             UB04_INPATIENT_DISCHARGE_STATUS
