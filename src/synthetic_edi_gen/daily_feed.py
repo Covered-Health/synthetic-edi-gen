@@ -955,14 +955,16 @@ def daily_feed(
     ds = the_date.strftime("%Y%m%d")
 
     claims_path = output_dir / f"837_claims_{ds}.jsonl"
-    with open(claims_path, "w") as f:
-        for c in all_claims:
-            write_jsonl(f, c)
+    if all_claims:
+        with open(claims_path, "w") as f:
+            for c in all_claims:
+                write_jsonl(f, c)
 
     payments_path = output_dir / f"835_payments_{ds}.jsonl"
-    with open(payments_path, "w") as f:
-        for p in all_payments:
-            write_jsonl(f, p)
+    if all_payments:
+        with open(payments_path, "w") as f:
+            for p in all_payments:
+                write_jsonl(f, p)
 
     ar_ext = "csv" if ar_format == "csv" else "xlsx"
     ar_path = output_dir / f"openar_{ds}.{ar_ext}"
@@ -977,8 +979,14 @@ def daily_feed(
 
     # Summary
     print(f"\nDaily feed for {the_date}:")
-    print(f"  837 claims:  {len(all_claims):,} -> {claims_path}")
-    print(f"  835 payments: {len(all_payments):,} -> {payments_path}")
+    print(
+        f"  837 claims:  {len(all_claims):,} -> "
+        f"{claims_path if all_claims else 'skipped (no records)'}"
+    )
+    print(
+        f"  835 payments: {len(all_payments):,} -> "
+        f"{payments_path if all_payments else 'skipped (no records)'}"
+    )
     print(f"  AR snapshot:  {len(ar_rows):,} open items -> {ar_path}")
     print(f"  Pending claims: {len(state.pending_claims):,}")
     print(f"  Total submitted: {state.total_claims_submitted:,}")

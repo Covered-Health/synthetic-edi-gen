@@ -384,6 +384,21 @@ class TestDailyFeedGenerator:
 
 
 class TestDailyFeedCLI:
+    def test_does_not_write_empty_claim_or_payment_files(self, tmp_path: Path):
+        output_dir = tmp_path / "output"
+
+        daily_feed(
+            state_file=tmp_path / "state.json",
+            output_dir=output_dir,
+            seed=42,
+            target_date="2025-06-07",
+            claims_per_day_min=0,
+            claims_per_day_max=0,
+        )
+
+        assert not (output_dir / "837_claims_20250607.jsonl").exists()
+        assert not (output_dir / "835_payments_20250607.jsonl").exists()
+
     def test_end_to_end(self, tmp_path: Path):
         state_file = tmp_path / "state.json"
         output_dir = tmp_path / "output"
@@ -401,7 +416,7 @@ class TestDailyFeedCLI:
         ar_file = output_dir / "openar_20250602.csv"
 
         assert claims_file.exists()
-        assert payments_file.exists()
+        assert not payments_file.exists()
         assert ar_file.exists()
 
         # Verify claims are valid JSON
