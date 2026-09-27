@@ -6,7 +6,7 @@ Generate realistic 835 (Payment/Remittance) records that match 837 claims.
 import random
 import uuid
 from datetime import date, timedelta
-from typing import Any
+from typing import Any, cast
 
 from synthetic_edi_gen.edi_models import (
     Adjustment,
@@ -22,18 +22,17 @@ from synthetic_edi_gen.edi_models import (
     Transaction835,
 )
 
-from .basic_codes import (
-    BASIC_CARC_CODES,
-    BASIC_RARC_CODES,
-    DENIAL_RARC_CODES,
-    REJECTION_RARCS_BY_CARC,
+from .basic_codes import DENIAL_CARC_CODES, REJECTION_RARCS_BY_CARC
+from .helpers import generate_transaction_id
+from .reference_data import Payer, sample_payer
+from .stats import (
+    code_description,
+    sample_conditional,
+    sample_count,
+    sample_numeric,
+    sample_presence,
+    sample_reverse_conditional,
 )
-from .helpers import (
-    apply_adjustment,
-    calculate_contracted_amount,
-    generate_transaction_id,
-)
-from .reference_data import COMMON_PAYERS, Payer
 
 
 class PaymentGenerator:
@@ -53,7 +52,15 @@ class PaymentGenerator:
         The payment will have matching PCN and realistic payment logic.
         """
         # Determine payment scenario
-        payment_scenario = self._select_payment_scenario()
+        first_procedure = next(
+            (
+                line.procedure.code
+                for line in claim.service_lines or []
+                if line.procedure is not None
+            ),
+            "",
+        )
+        payment_scenario = self._select_payment_scenario(first_procedure)
 
         # Extract claim info
         pcn = claim.patient_control_number
@@ -185,7 +192,23 @@ class PaymentGenerator:
         self, claim: ProfClaim | InstClaim, primary_payment: Payment
     ) -> Payment:
         """Generate a secondary payer 835 for amounts left by the primary."""
-        deny = random.random() < 0.20
+        first_procedure = next(
+            (
+                line.procedure.code
+                for line in claim.service_lines or []
+                if line.procedure is not None
+            ),
+            "",
+        )
+        deny = (
+            sample_reverse_conditional(
+                "payment_status_procedure",
+                first_procedure,
+                fallback="payment_status",
+                allowed={"SECONDARY", "DENIED"},
+            )
+            == "DENIED"
+        )
         primary_lines = {
             line.source_line_id: line for line in primary_payment.service_lines or []
         }
@@ -235,129 +258,100 @@ class PaymentGenerator:
             transaction=self._generate_transaction(payment_date, float(total_paid)),
         )
 
-    def _select_payment_scenario(self) -> dict[str, Any]:
-        """
-        Select a payment scenario with realistic probabilities.
-
-        Scenarios:
-        - full_payment: 50% - Claim fully paid with normal adjustments
-        - partial_payment: 25% - Claim partially paid with patient responsibility
-        - full_denial: 25% - Claim fully denied (realistic CARC/RARC on 835)
-        """
-        rand = random.random()
-
-        if rand < 0.50:
-            return {"type": "full_payment"}
-        elif rand < 0.75:
-            return {"type": "partial_payment"}
-        else:
-            return {"type": "full_denial"}
+    def _select_payment_scenario(self, procedure: str = "") -> dict[str, Any]:
+        """Select paid or denied using the procedure/status correlation."""
+        status = sample_reverse_conditional(
+            "payment_status_procedure",
+            procedure,
+            fallback="payment_status",
+            allowed={"PRIMARY", "DENIED"},
+        )
+        return {"type": "full_denial" if status == "DENIED" else "full_payment"}
 
     def _process_service_line(
         self, claim_line: ProfLine | InstLine, scenario: dict[str, Any]
     ) -> PaymentLine:
-        """Process a service line and generate payment information."""
+        """Process a line with empirical financial and adjustment distributions."""
         charge_amount = float(claim_line.charge_amount)
-
-        # Calculate contracted/allowed amount (typically 60-80% of charge)
-        allowed_amount = calculate_contracted_amount(charge_amount, discount_pct=0.40)
-
+        procedure = claim_line.procedure.code if claim_line.procedure else ""
         adjustments: list[Adjustment] = []
-        remarks: list[Code] | None = None
-
-        # Apply payment scenario
         if scenario["type"] == "full_denial":
-            # Full denial - zero payment with realistic CARC and RARC
             paid_amount = 0.0
-            adjustments = self._generate_denial_adjustments(charge_amount)
-            # Add denial RARC remark(s)
-            remarks = []
-            num_remarks = random.randint(1, 2)
-            for rarc in random.sample(
-                DENIAL_RARC_CODES, min(num_remarks, len(DENIAL_RARC_CODES))
-            ):
-                remarks.append(
-                    Code(
-                        sub_type="RARC",
-                        code=rarc.code,
-                        desc=rarc.description,
-                    )
-                )
+            adjustment_count = max(1, sample_count("payment_line_adjustment_count"))
+        else:
+            paid_amount = min(
+                charge_amount,
+                max(
+                    0.0,
+                    sample_numeric(
+                        "paid_amount_bucket",
+                        conditions=(("procedure_paid_amount_bucket", procedure),),
+                    ),
+                ),
+            )
+            adjustment_count = (
+                sample_count("payment_line_adjustment_count")
+                if sample_presence("payment_line_has_adjustment")
+                else 0
+            )
 
-        elif scenario["type"] == "partial_payment":
-            # Partial payment with patient responsibility
-
-            # Add contractual adjustment (charge vs allowed)
-            contractual_adj = charge_amount - allowed_amount
-            if contractual_adj > 0:
-                adjustments.append(
-                    Adjustment(
-                        group="CONTRACTUAL",
-                        reason=Code(
-                            sub_type="CARC",
-                            code="45",
-                            desc="Charge exceeds fee schedule/maximum allowable",
-                        ),
-                        amount=float(contractual_adj),
-                    )
-                )
-
-            # Add patient responsibility (deductible, coinsurance, or copay)
-            patient_resp_type = random.choice(["deductible", "coinsurance", "copay"])
-            patient_resp_amount = apply_adjustment(allowed_amount, patient_resp_type)
-
-            if patient_resp_type == "deductible":
-                carc_code = "1"
-                carc_desc = "Deductible Amount"
-            elif patient_resp_type == "coinsurance":
-                carc_code = "2"
-                carc_desc = "Coinsurance Amount"
-            else:  # copay
-                carc_code = "3"
-                carc_desc = "Co-payment Amount"
-
+        selected_carcs: list[str] = []
+        for _ in range(adjustment_count):
+            carc = sample_conditional(
+                "procedure_carc",
+                procedure,
+                fallback="carc",
+                allowed=DENIAL_CARC_CODES
+                if scenario["type"] == "full_denial"
+                else None,
+            )
+            group = sample_conditional("carc_group", carc, fallback="adjustment_group")
+            bucket_amount = sample_numeric(
+                "adjustment_amount_bucket",
+                conditions=(("procedure_adjustment_amount_bucket", procedure),),
+            )
+            percent = sample_numeric(
+                "adjustment_percent_bucket",
+                conditions=(("procedure_adjustment_percent_bucket", procedure),),
+            )
+            amount = min(
+                charge_amount,
+                (bucket_amount + charge_amount * percent / 100) / 2,
+            )
             adjustments.append(
                 Adjustment(
-                    group="PATIENT_RESPONSIBILITY",
-                    reason=Code(sub_type="CARC", code=carc_code, desc=carc_desc),
-                    amount=float(patient_resp_amount),
+                    group=cast(Any, group),
+                    reason=Code(
+                        sub_type="CARC",
+                        code=carc,
+                        desc=code_description("carc", carc),
+                    ),
+                    amount=float(amount),
                 )
             )
+            selected_carcs.append(carc)
 
-            paid_amount = allowed_amount - patient_resp_amount
-
-        else:  # full_payment
-            # Full payment with contractual adjustment only
-            contractual_adj = charge_amount - allowed_amount
-
-            if contractual_adj > 0:
-                adjustments.append(
-                    Adjustment(
-                        group="CONTRACTUAL",
-                        reason=Code(
-                            sub_type="CARC",
-                            code="45",
-                            desc="Charge exceeds fee schedule/maximum allowable",
-                        ),
-                        amount=float(contractual_adj),
-                    )
-                )
-
-            paid_amount = allowed_amount
-
-        # Sometimes add remark codes (full_denial already has denial RARCs)
-        if scenario["type"] != "full_denial" and random.random() < 0.3:
-            remarks = []
-            num_remarks = random.randint(1, 2)
-            selected_remarks = random.sample(
-                BASIC_RARC_CODES, min(num_remarks, len(BASIC_RARC_CODES))
+        remarks: list[Code] = []
+        rarc_count = (
+            sample_count("payment_line_rarc_count")
+            if sample_presence("payment_line_has_rarc")
+            else 0
+        )
+        if "16" in selected_carcs:
+            rarc_count = max(1, rarc_count)
+        for _ in range(rarc_count):
+            correlation, value = (
+                ("carc_rarc", selected_carcs[0])
+                if selected_carcs
+                else ("procedure_rarc", procedure)
             )
-            for rarc in selected_remarks:
+            rarc = sample_conditional(correlation, value, fallback="rarc")
+            if rarc not in {remark.code for remark in remarks}:
                 remarks.append(
                     Code(
                         sub_type="RARC",
-                        code=rarc.code,
-                        desc=rarc.description,
+                        code=rarc,
+                        desc=code_description("rarc", rarc),
                     )
                 )
 
@@ -370,8 +364,8 @@ class PaymentGenerator:
             unit_count=claim_line.unit_count,
             procedure=claim_line.procedure,
             revenue_code=getattr(claim_line, "revenue_code", None),
-            adjustments=adjustments if adjustments else None,
-            remarks=remarks,
+            adjustments=adjustments or None,
+            remarks=remarks or None,
             remark_codes=[r.code for r in remarks] if remarks else None,
         )
 
@@ -387,18 +381,30 @@ class PaymentGenerator:
 
         if deny:
             paid_amount = 0.0
-            adjustments = self._generate_denial_adjustments(unpaid_amount)
+            procedure = claim_line.procedure.code if claim_line.procedure else ""
+            adjustments = self._generate_denial_adjustments(unpaid_amount, procedure)
+            reason = adjustments[0].reason
+            carc = reason.code if reason else "16"
+            rarc = sample_conditional("carc_rarc", carc, fallback="rarc")
             remarks = [
                 Code(
                     sub_type="RARC",
-                    code="N428",
-                    desc="Alert: Refer to the 835 for more detail.",
+                    code=rarc,
+                    desc=code_description("rarc", rarc),
                 )
             ]
         else:
-            paid_amount = unpaid_amount
-            if random.random() < 0.75:
-                paid_amount = round(unpaid_amount * random.uniform(0.50, 0.90), 2)
+            procedure = claim_line.procedure.code if claim_line.procedure else ""
+            paid_amount = min(
+                unpaid_amount,
+                max(
+                    0.0,
+                    sample_numeric(
+                        "paid_amount_bucket",
+                        conditions=(("procedure_paid_amount_bucket", procedure),),
+                    ),
+                ),
+            )
             patient_resp = round(unpaid_amount - paid_amount, 2)
             adjustments = []
             if patient_resp > 0:
@@ -429,30 +435,28 @@ class PaymentGenerator:
             remark_codes=[r.code for r in remarks] if remarks else None,
         )
 
-    def _generate_denial_adjustments(self, charge_amount: float) -> list[Adjustment]:
+    def _generate_denial_adjustments(
+        self, charge_amount: float, procedure: str = ""
+    ) -> list[Adjustment]:
         """Generate adjustments for a denied claim."""
-        # Select a denial reason
-        denial_carcs = [
-            carc
-            for carc in BASIC_CARC_CODES
-            if carc.code in ["16", "29", "50", "96", "97"]
-        ]
-
-        selected_carc = random.choice(denial_carcs)
-
-        adjustments = [
+        carc = sample_conditional(
+            "procedure_carc",
+            procedure,
+            fallback="carc",
+            allowed=DENIAL_CARC_CODES,
+        )
+        group = sample_conditional("carc_group", carc, fallback="adjustment_group")
+        return [
             Adjustment(
-                group=selected_carc.group,
+                group=cast(Any, group),
                 reason=Code(
                     sub_type="CARC",
-                    code=selected_carc.code,
-                    desc=selected_carc.description,
+                    code=carc,
+                    desc=code_description("carc", carc),
                 ),
                 amount=float(charge_amount),
             )
         ]
-
-        return adjustments
 
     @staticmethod
     def _secondary_payer_data(claim: ProfClaim | InstClaim) -> Payer:
@@ -461,7 +465,7 @@ class PaymentGenerator:
             if claim.subscriber and claim.subscriber.payer
             else None
         )
-        return random.choice([p for p in COMMON_PAYERS if p.identifier != primary_id])
+        return sample_payer(exclude_identifier=primary_id)
 
     @staticmethod
     def _payer_party(payer: Payer) -> Party:

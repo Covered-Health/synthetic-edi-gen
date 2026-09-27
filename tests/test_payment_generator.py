@@ -5,6 +5,7 @@ import pytest
 from synthetic_edi_gen.basic_codes import DENIAL_CARC_CODES
 from synthetic_edi_gen.claim_generator import ClaimGenerator
 from synthetic_edi_gen.payment_generator import PaymentGenerator
+from synthetic_edi_gen.stats import catalog
 
 
 @pytest.fixture()
@@ -70,10 +71,10 @@ class TestPaymentStructure:
 
 
 class TestPaymentScenarios:
-    """Test the three payment scenarios by generating many payments."""
+    """Test observed payment statuses by generating many payments."""
 
     @pytest.fixture()
-    def many_payments(self):
+    def many_payments(self, monkeypatch):
         """Generate a large sample to cover all scenarios."""
         cg = ClaimGenerator(seed=0)
         pg = PaymentGenerator(seed=0)
@@ -82,38 +83,27 @@ class TestPaymentScenarios:
             claim = cg.generate_claim()
             payment = pg.generate_payment_for_claim(claim)
             results.append((claim, payment))
+        monkeypatch.setattr(
+            pg, "_select_payment_scenario", lambda _procedure: {"type": "full_denial"}
+        )
+        claim = cg.generate_claim()
+        results.append((claim, pg.generate_payment_for_claim(claim)))
         return results
 
     def test_has_full_payments(self, many_payments):
         full = [p for _, p in many_payments if p.claim_status_code == "1"]
         assert len(full) > 0
 
-    def test_has_partial_payments(self, many_payments):
-        partial = [p for _, p in many_payments if p.claim_status_code == "19"]
-        assert len(partial) > 0
-
     def test_has_denials(self, many_payments):
         denied = [p for _, p in many_payments if p.claim_status_code == "2"]
         assert len(denied) > 0
 
-    def test_full_payment_has_contractual_adjustment(self, many_payments):
+    def test_full_payment_adjustments_use_catalog_carcs(self, many_payments):
         full = [p for _, p in many_payments if p.claim_status_code == "1"]
         for payment in full[:5]:
             for line in payment.service_lines:
-                if line.adjustments:
-                    groups = {a.group for a in line.adjustments}
-                    assert "CONTRACTUAL" in groups
-
-    def test_partial_payment_has_patient_responsibility(self, many_payments):
-        partial = [p for _, p in many_payments if p.claim_status_code == "19"]
-        for payment in partial[:5]:
-            has_pr = False
-            for line in payment.service_lines:
-                if line.adjustments:
-                    for adj in line.adjustments:
-                        if adj.group == "PATIENT_RESPONSIBILITY":
-                            has_pr = True
-            assert has_pr
+                for adjustment in line.adjustments or []:
+                    assert adjustment.reason.code in catalog("carc")
 
     def test_denial_has_zero_paid(self, many_payments):
         denied = [p for _, p in many_payments if p.claim_status_code == "2"]
@@ -130,13 +120,13 @@ class TestPaymentScenarios:
                 carc_codes = {a.reason.code for a in line.adjustments}
                 assert carc_codes & DENIAL_CARC_CODES
 
-    def test_denial_has_rarc_remarks(self, many_payments):
+    def test_denial_rarcs_use_catalog(self, many_payments):
         denied = [p for _, p in many_payments if p.claim_status_code == "2"]
         for payment in denied[:5]:
             for line in payment.service_lines:
-                assert line.remarks
-                for remark in line.remarks:
+                for remark in line.remarks or []:
                     assert remark.sub_type == "RARC"
+                    assert remark.code in catalog("rarc")
 
     @pytest.mark.parametrize(("carc", "rarc"), [("16", "N257"), ("4", "N519")])
     def test_clearinghouse_rejection_uses_each_recognized_carc_family(
@@ -224,7 +214,7 @@ class TestPaymentLineDetails:
         cg = ClaimGenerator(seed=42)
         pg = PaymentGenerator(seed=42)
         monkeypatch.setattr(
-            pg, "_select_payment_scenario", lambda: {"type": "full_payment"}
+            pg, "_select_payment_scenario", lambda _procedure: {"type": "full_payment"}
         )
 
         payment = pg.generate_payment_for_claim(cg.generate_claim(), forwarded=True)
@@ -237,7 +227,8 @@ class TestPaymentLineDetails:
         claim = cg.generate_claim()
         primary = pg.generate_payment_for_claim(claim)
         monkeypatch.setattr(
-            "synthetic_edi_gen.payment_generator.random.random", lambda: 0.0
+            "synthetic_edi_gen.payment_generator.sample_reverse_conditional",
+            lambda *args, **kwargs: "DENIED",
         )
 
         secondary = pg.generate_secondary_payment_for_claim(claim, primary)

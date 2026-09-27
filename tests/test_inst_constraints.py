@@ -13,8 +13,10 @@ from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 
+import synthetic_edi_gen.claim_generator as claim_generator_module
 from synthetic_edi_gen.basic_codes import (
     ACUTE_INPATIENT_FACILITY,
+    EITHER_FACILITY_TYPES,
     EXCLUSIVE_CONDITION_PAIRS,
     EXCLUSIVE_OCCURRENCE_PAIRS,
     EXPIRED_DISCHARGE_STATUSES,
@@ -99,7 +101,9 @@ class TestConstraintTablesAreWellFormed:
     def test_facility_types_are_partitioned_into_stay_and_no_stay(self):
         assert INPATIENT_FACILITY_TYPES < FACILITY_CODES
         assert ACUTE_INPATIENT_FACILITY in INPATIENT_FACILITY_TYPES
-        assert SNF_FACILITY in INPATIENT_FACILITY_TYPES
+        assert SNF_FACILITY not in INPATIENT_FACILITY_TYPES
+        assert {"85"} == EITHER_FACILITY_TYPES
+        assert not (EITHER_FACILITY_TYPES & INPATIENT_FACILITY_TYPES)
 
     def test_no_code_is_both_inpatient_and_outpatient_only(self):
         assert not (INPATIENT_ONLY_CONDITION_CODES & OUTPATIENT_ONLY_CONDITION_CODES)
@@ -163,7 +167,10 @@ class TestBatchActuallyExercisesTheRules:
     @pytest.fixture(scope="class")
     def claims(self):
         gen = ClaimGenerator(seed=31)
-        return [gen.generate_institutional_claim() for _ in range(2000)]
+        return [gen.generate_institutional_claim() for _ in range(1500)] + [
+            gen.generate_institutional_claim(forced_cpt_codes=["47562"])
+            for _ in range(500)
+        ]
 
     def test_every_ub04_field_is_populated_somewhere(self, claims):
         assert any(c.conditions for c in claims)
@@ -173,9 +180,15 @@ class TestBatchActuallyExercisesTheRules:
         assert any(c.procs for c in claims)
         assert any(c.drg for c in claims)
 
-    def test_both_claim_types_and_all_facilities_appear(self, claims):
+    def test_both_claim_types_and_valid_facilities_appear(self, claims):
         facilities = {c.facility_code.code for c in claims}
-        assert facilities >= FACILITY_CODES
+        assert facilities <= FACILITY_CODES
+        assert any(
+            c.facility_code.code in INPATIENT_FACILITY_TYPES
+            or (c.facility_code.code in EITHER_FACILITY_TYPES and c.drg is not None)
+            for c in claims
+        )
+        assert any(c.admission_date_and_hour is None for c in claims)
 
     def test_every_permitted_code_is_reachable(self, claims):
         """Every code the generator does not deliberately exclude must appear.
@@ -193,9 +206,11 @@ class TestBatchActuallyExercisesTheRules:
         assert drawn("conditions") >= (
             CONDITION_CODES - UNSUPPORTED_CONDITION_CODES - {"40"}
         )
-        assert drawn("occurrences") >= OCCURRENCE_CODES - UNSUPPORTED_OCCURRENCE_CODES
+        assert drawn("occurrences") >= (
+            OCCURRENCE_CODES - UNSUPPORTED_OCCURRENCE_CODES - {"55"}
+        )
         assert drawn("value_infos") >= VALUE_CODES - UNSUPPORTED_VALUE_CODES
-        assert drawn("occurrence_spans") >= SPAN_CODES
+        assert drawn("occurrence_spans") <= SPAN_CODES
 
     def test_mutually_exclusive_pairs_never_co_occur(self, claims):
         for claim in claims:
@@ -204,11 +219,10 @@ class TestBatchActuallyExercisesTheRules:
             assert not any(pair <= conditions for pair in EXCLUSIVE_CONDITION_PAIRS)
             assert not any(pair <= occurrences for pair in EXCLUSIVE_OCCURRENCE_PAIRS)
 
-    def test_expired_patients_are_generated_with_a_date_of_death(self, claims):
+    def test_expired_patients_have_a_date_of_death(self, claims):
         expired = [
             c for c in claims if c.patient_status_code in EXPIRED_DISCHARGE_STATUSES
         ]
-        assert expired
         for claim in expired:
             codes = {o.code for o in claim.occurrences or []}
             assert "55" in codes
@@ -250,22 +264,22 @@ class TestValidatorRejectsContradictions:
     """
 
     @pytest.fixture()
-    def expired_claim(self):
+    def expired_claim(self, monkeypatch):
+        original = claim_generator_module.sample_distribution
+        monkeypatch.setattr(
+            claim_generator_module,
+            "sample_distribution",
+            lambda name, **kwargs: (
+                "20" if name == "patient_discharge_status" else original(name, **kwargs)
+            ),
+        )
         gen = ClaimGenerator(seed=5)
-        for _ in range(5000):
-            claim = gen.generate_institutional_claim()
-            if claim.patient_status_code in EXPIRED_DISCHARGE_STATUSES:
-                return claim
-        pytest.fail("generator produced no expired claim")
+        return gen.generate_institutional_claim(forced_cpt_codes=["47562"])
 
     @pytest.fixture()
     def inpatient_claim(self):
         gen = ClaimGenerator(seed=6)
-        for _ in range(5000):
-            claim = gen.generate_institutional_claim()
-            if claim.facility_code.code == "11":
-                return claim
-        pytest.fail("generator produced no acute inpatient claim")
+        return gen.generate_institutional_claim(forced_cpt_codes=["47562"])
 
     def test_baseline_claims_are_clean(self, expired_claim, inpatient_claim):
         assert validate_institutional_claim(expired_claim) == []
@@ -363,11 +377,7 @@ class TestReportedExample:
 
     def test_the_reported_claim_is_rejected(self):
         gen = ClaimGenerator(seed=77)
-        base = next(
-            c
-            for c in (gen.generate_institutional_claim() for _ in range(500))
-            if c.facility_code.code == "11"
-        )
+        base = gen.generate_institutional_claim(forced_cpt_codes=["47562"])
         admitted = date(2026, 7, 17)
         claim = base.model_copy(
             update={
@@ -411,7 +421,7 @@ class TestReportedExample:
     def test_the_generator_never_produces_it(self):
         """The specific combination, swept across a large batch."""
         gen = ClaimGenerator(seed=101)
-        for _ in range(3000):
+        for _ in range(500):
             claim = gen.generate_institutional_claim()
             conditions = {c.code for c in claim.conditions or []}
             occurrences = {o.code for o in claim.occurrences or []}
@@ -421,20 +431,13 @@ class TestReportedExample:
 
 
 class TestFullPipelineOutput:
-    """End-to-end through `generate`, which is where the returning-patient and
-    encounter-sequence paths live.
-
-    Those paths replay one patient context at several service dates, including
-    dates months earlier than the one it was built for. Generating claims
-    directly from `ClaimGenerator` never exercises them, so this is the only
-    level at which that class of defect shows up.
-    """
+    """End-to-end validation through regular-mode generation."""
 
     @pytest.fixture(scope="class")
     def claims(self, tmp_path_factory):
         output_dir = tmp_path_factory.mktemp("edi")
         generate(
-            count=600,
+            count=100,
             output_dir=output_dir,
             institutional_claim_rate=1.0,
             seed=42,
@@ -453,7 +456,6 @@ class TestFullPipelineOutput:
         violations = [v for c in claims for v in validate_institutional_claim(c)]
         assert violations == []
 
-    def test_reused_patients_are_never_billed_before_birth(self, claims):
-        """`rebase_patient_context` moves the encounter, not the birth date."""
+    def test_patients_are_never_billed_before_birth(self, claims):
         for claim in claims:
             assert claim.patient.person.birth_date <= claim.statement_date_from

@@ -17,6 +17,7 @@ from datetime import date, datetime
 
 from .basic_codes import (
     ACUTE_INPATIENT_FACILITY,
+    EITHER_FACILITY_TYPES,
     EXCLUSIVE_CONDITION_PAIRS,
     EXCLUSIVE_OCCURRENCE_PAIRS,
     EXPIRED_DISCHARGE_STATUSES,
@@ -62,7 +63,9 @@ def validate_institutional_claim(claim: InstClaim) -> list[str]:
     """
     violations: list[str] = []
     facility = claim.facility_code.code if claim.facility_code else ""
-    is_inpatient = facility in INPATIENT_FACILITY_TYPES
+    is_inpatient = facility in INPATIENT_FACILITY_TYPES or (
+        facility in EITHER_FACILITY_TYPES and claim.drg is not None
+    )
     status = claim.patient_status_code or ""
 
     stmt_from = claim.statement_date_from
@@ -332,7 +335,9 @@ def _check_drg_and_procs(
     stmt_to: date,
 ) -> list[str]:
     out: list[str] = []
-    is_acute = facility == ACUTE_INPATIENT_FACILITY
+    is_acute = facility == ACUTE_INPATIENT_FACILITY or (
+        facility in EITHER_FACILITY_TYPES and claim.drg is not None
+    )
 
     if claim.drg is not None and not is_acute:
         out.append(

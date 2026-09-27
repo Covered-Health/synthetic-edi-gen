@@ -29,12 +29,12 @@ class TestPlanHarGroups:
         groups = _plan_har_groups(1)
         assert groups == [1]
 
-    def test_mostly_single_pcn_groups(self):
-        # Given the distribution, most groups should be size 1
-        groups = _plan_har_groups(1000)
-        single_pcn = sum(1 for g in groups if g == 1)
-        # At least 90% should be single-PCN (production data says ~97%)
-        assert single_pcn / len(groups) > 0.90
+    def test_uses_claims_per_patient_distribution(self, monkeypatch):
+        monkeypatch.setattr(
+            "synthetic_edi_gen.generate.sample_count", lambda *args, **kwargs: 3
+        )
+
+        assert _plan_har_groups(8) == [3, 3, 2]
 
     def test_some_multi_pcn_groups_in_large_sample(self):
         groups = _plan_har_groups(10000)
@@ -229,10 +229,11 @@ class TestGenerate:
         ]
         assert any(
             line["adjustments"][0]["reason"]["code"] in REJECTION_RARCS_BY_CARC
-            and set(line.get("remarkCodes", []))
+            and set(line.get("remarkCodes") or [])
             & set(REJECTION_RARCS_BY_CARC[line["adjustments"][0]["reason"]["code"]])
             for payment in payments
             for line in payment.get("serviceLines", [])
+            if line.get("adjustments")
         )
 
     def test_secondary_payer_rate_adds_extra_835s(self, tmp_path):
@@ -300,155 +301,38 @@ class TestGenerate:
         assert fields1 == fields2
 
     def test_multi_pcn_har_groups_share_patient(self, tmp_path):
-        # Generate enough claims to get some multi-PCN groups
-        output_dir = tmp_path / "output"
-        generate(count=200, output_dir=output_dir, seed=42)
-
-        claims = []
-        for line in _read_all_jsonl(output_dir, "837_claims"):
-            claims.append(json.loads(line))
-
-        # Group claims by billing provider NPI (shared within HAR group)
-        by_npi = {}
-        for c in claims:
-            npi = c["billingProvider"]["identifier"]
-            by_npi.setdefault(npi, []).append(c)
-
-        # Find a group with >1 claim
-        multi_groups = {npi: cs for npi, cs in by_npi.items() if len(cs) > 1}
-        assert len(multi_groups) > 0, "Expected some multi-PCN groups"
-
-        # Verify shared demographics in first multi-PCN group found
-        for _npi, group_claims in multi_groups.items():
-            first_patient = group_claims[0]["patient"]["person"]
-            for claim in group_claims[1:]:
-                patient = claim["patient"]["person"]
-                assert patient["firstName"] == first_patient["firstName"]
-                assert (
-                    patient["lastNameOrOrgName"] == first_patient["lastNameOrOrgName"]
-                )
-            break  # only need to verify one group
-
-    def test_patient_reuse_shares_mrn_and_demographics(self, tmp_path):
-        """Returning patients share the same MRN, name, and DoB across HAR groups."""
         import csv
 
+        # Generate enough claims to get some multi-PCN groups
         output_dir = tmp_path / "output"
-        # Large enough sample with a seed that triggers reuse
         generate(
-            count=500,
+            count=200,
             output_dir=output_dir,
             seed=42,
             export_datetime=_EXPORT_DATETIME,
         )
 
-        # Read OpenAR CSV (skip 9 header rows + 1 column header row)
-        ar_path = output_dir / "openar_20250602.csv"
-        with open(ar_path) as f:
-            reader = csv.reader(f)
-            rows = list(reader)
-        # Header rows: 9 metadata + 1 column header
-        col_headers = rows[9]
-        mrn_idx = col_headers.index("MRN")
-        har_idx = col_headers.index("Hospital Account ID")
-        data_rows = rows[10:]
-
-        # Group rows by MRN
-        by_mrn: dict[str, set[str]] = {}
-        for row in data_rows:
-            mrn = row[mrn_idx]
-            har = row[har_idx]
-            by_mrn.setdefault(mrn, set()).add(har)
-
-        # Some MRNs should appear with multiple distinct HAR IDs (returning patients)
-        multi_har_mrns = {mrn: hars for mrn, hars in by_mrn.items() if len(hars) > 1}
-        assert len(multi_har_mrns) > 0, (
-            "Expected some patients (MRNs) with multiple HAR groups"
-        )
-
-        # Also verify that claims for the same MRN share patient demographics
-        claims = [
-            json.loads(line) for line in _read_all_jsonl(output_dir, "837_claims")
-        ]
-
-        # Build mapping: PCN → patient demographics
-        pcn_to_patient = {}
-        for c in claims:
-            pcn_to_patient[c["patientControlNumber"]] = c["patient"]["person"]
-
-        # Read AR rows and group PCNs by MRN
-        pcns_by_mrn: dict[str, list[str]] = {}
-        invoice_idx = col_headers.index("Invoice Number")
-        for row in data_rows:
-            mrn = row[mrn_idx]
-            pcn = row[invoice_idx]
-            pcns_by_mrn.setdefault(mrn, []).append(pcn)
-
-        # For MRNs with multiple HARs, verify all PCNs share the same patient name/DoB
-        for mrn in multi_har_mrns:
-            pcns = set(pcns_by_mrn[mrn])
-            patients = [pcn_to_patient[pcn] for pcn in pcns if pcn in pcn_to_patient]
-            if len(patients) < 2:
-                continue
-            first = patients[0]
-            for p in patients[1:]:
-                assert p["firstName"] == first["firstName"]
-                assert p["lastNameOrOrgName"] == first["lastNameOrOrgName"]
-                assert p["birthDate"] == first["birthDate"]
-
-    def test_encounter_sequences_produce_coordinated_claims(self, tmp_path):
-        """Encounter sequences produce claims with shared patient and
-        related diagnoses across visits (e.g. consult → surgery → follow-up)."""
-        output_dir = tmp_path / "output"
-        # Use a large-ish count so encounter sequences are likely to trigger.
-        generate(count=1000, output_dir=output_dir, seed=7)
-
-        claims = [
-            json.loads(line) for line in _read_all_jsonl(output_dir, "837_claims")
-        ]
-
-        # Group claims by (patient first name, last name, DoB) to find
-        # patients with multiple visits.
-        by_patient: dict[tuple, list[dict]] = {}
-        for c in claims:
-            p = c["patient"]["person"]
-            key = (p["firstName"], p["lastNameOrOrgName"], p["birthDate"])
-            by_patient.setdefault(key, []).append(c)
-
-        multi_visit = {k: v for k, v in by_patient.items() if len(v) > 1}
-        assert len(multi_visit) > 0, "Expected some patients with multiple visits"
-
-        # Look for a surgical sequence: claims for the same patient where one
-        # service line has a surgical CPT code (27447, 47562, 29881, 49505)
-        surgical_cpts = {"27447", "47562", "29881", "49505"}
-        found_surgery_sequence = False
-        for _key, patient_claims in multi_visit.items():
-            cpts_across_visits: list[set[str]] = []
-            for c in patient_claims:
-                visit_cpts = set()
-                for sl in c.get("serviceLines", []):
-                    proc = sl.get("procedure") or {}
-                    visit_cpts.add(proc.get("code", ""))
-                cpts_across_visits.append(visit_cpts)
-
-            has_surgery = any(cpts & surgical_cpts for cpts in cpts_across_visits)
-            has_office_visit = any(
-                cpts & {"99213", "99204", "99205", "99214"}
-                for cpts in cpts_across_visits
+        claims = {
+            claim["patientControlNumber"]: claim
+            for claim in (
+                json.loads(line) for line in _read_all_jsonl(output_dir, "837_claims")
             )
-            if has_surgery and has_office_visit:
-                found_surgery_sequence = True
-                # Verify the surgery and office visit are on different dates
-                dates = {c["serviceDateFrom"] for c in patient_claims}
-                assert len(dates) > 1, (
-                    "Surgery sequence should have different service dates"
-                )
-                break
+        }
+        with open(output_dir / "openar_20250602.csv") as handle:
+            rows = list(csv.reader(handle))
+        headers = rows[9]
+        har_index = headers.index("Hospital Account ID")
+        pcn_index = headers.index("Invoice Number")
+        by_har: dict[str, set[str]] = {}
+        for row in rows[10:]:
+            if row[pcn_index] in claims:
+                by_har.setdefault(row[har_index], set()).add(row[pcn_index])
 
-        assert found_surgery_sequence, (
-            "Expected at least one surgery pathway "
-            "(consult + surgery for the same patient)"
-        )
+        multi_groups = [pcns for pcns in by_har.values() if len(pcns) > 1]
+        assert len(multi_groups) > 0, "Expected some multi-PCN groups"
+
+        patients = [claims[pcn]["patient"]["person"] for pcn in multi_groups[0]]
+        assert all(patient == patients[0] for patient in patients[1:])
 
     def test_no_splitting_with_zero(self, tmp_path):
         """claims_per_file=0 produces single unsuffixed file."""

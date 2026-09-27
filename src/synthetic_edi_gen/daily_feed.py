@@ -19,7 +19,7 @@ import random
 import string
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
 from .claim_generator import ClaimGenerator, PatientContext
@@ -44,7 +44,7 @@ from .feed_state import (
     save_state,
 )
 from .generate import write_jsonl
-from .helpers import generate_transaction_id
+from .helpers import generate_birth_date, generate_transaction_id
 from .openar_generator import (
     AGE_BUCKETS,
     DEPARTMENTS,
@@ -55,28 +55,26 @@ from .openar_generator import (
 from .payment_generator import PaymentGenerator
 from .reference_data import (
     CITIES_STATES,
-    COMMON_PAYERS,
     FIRST_NAMES,
     LAST_NAMES,
-    PLACE_OF_SERVICE,
     Payer,
     PlaceOfService,
+    place_of_service,
+    sample_payer,
+)
+from .stats import (
+    age_band_for,
+    code_description,
+    ratio,
+    sample_conditional,
+    sample_distribution,
 )
 
 # ---------------------------------------------------------------------------
 # Organisation profile: taxonomies for a multi-specialty surgical group
 # ---------------------------------------------------------------------------
 
-_PRACTICE_TAXONOMIES: list[tuple[str, str, int]] = [
-    ("207X00000X", "Orthopaedic Surgery Physician", 3),
-    ("207XS0114X", "Adult Reconstructive Orthopaedic Surgery", 1),
-    ("208600000X", "Surgery Physician", 2),
-    ("207Q00000X", "Family Medicine Physician", 2),
-    ("207R00000X", "Internal Medicine Physician", 1),
-    ("207LP2900X", "Pain Medicine", 1),
-    ("363LF0000X", "Family Nurse Practitioner", 2),
-    ("363A00000X", "Physician Assistant", 1),
-]
+_INITIAL_PROVIDER_COUNT = 13
 
 # ---------------------------------------------------------------------------
 # 835 response-time distribution (days from claim submission)
@@ -105,7 +103,7 @@ _REVERT_WINDOW_DAYS = 60
 # Patient-pool parameters
 # ---------------------------------------------------------------------------
 
-_RETURNING_PATIENT_RATE = 0.70
+_RETURNING_PATIENT_RATE = 1.0 - ratio("unique_patients_per_claim")
 _MAX_PATIENT_POOL = 2000
 
 
@@ -177,10 +175,17 @@ def init_state(seed: int, start_date: date | None = None) -> FeedState:
 
     providers: list[ProviderRecord] = []
     start_date = start_date or _today_eastern()
-    for tax_code, tax_desc, count in _PRACTICE_TAXONOMIES:
-        for _ in range(count):
-            hired = start_date - timedelta(days=rng.randint(365, 3650))
-            providers.append(_generate_provider_record(rng, tax_code, tax_desc, hired))
+    for _ in range(_INITIAL_PROVIDER_COUNT):
+        tax_code = sample_distribution("provider_taxonomy", rng=rng)
+        hired = start_date - timedelta(days=rng.randint(365, 3650))
+        providers.append(
+            _generate_provider_record(
+                rng,
+                tax_code,
+                code_description("provider_taxonomy", tax_code),
+                hired,
+            )
+        )
 
     return FeedState(seed=seed, organization=org, providers=providers)
 
@@ -322,7 +327,8 @@ class DailyFeedGenerator:
         # ~1 new hire per year for a 13-person group → ~0.3% daily chance
         if random.random() < 0.003:
             rng = random.Random(random.randint(0, 2**32))
-            tax_code, tax_desc, _ = random.choice(_PRACTICE_TAXONOMIES)
+            tax_code = sample_distribution("provider_taxonomy")
+            tax_desc = code_description("provider_taxonomy", tax_code)
             self.state.providers.append(
                 _generate_provider_record(rng, tax_code, tax_desc, day_date)
             )
@@ -332,9 +338,14 @@ class DailyFeedGenerator:
     # ------------------------------------------------------------------
 
     def _generate_new_claim(self, day_date: date) -> ProfClaim:
-        patient = self._pick_or_create_patient(day_date)
         provider_rec = self._pick_active_provider()
+        patient = self._pick_or_create_patient(day_date, provider_rec)
         ctx = self._build_patient_context(patient, provider_rec, day_date)
+        self._claim_gen._rendering_providers = [
+            self._provider_party(provider)
+            for provider in self.state.providers
+            if provider.departure_date is None
+        ]
 
         claim = self._claim_gen.generate_claim(ctx=ctx)
         # Override non-deterministic fields (uuid4 uses OS entropy, not random)
@@ -367,31 +378,46 @@ class DailyFeedGenerator:
         self.state.total_claims_submitted += 1
         return claim
 
-    def _pick_or_create_patient(self, day_date: date) -> PatientRecord:
+    def _pick_or_create_patient(
+        self, day_date: date, provider: ProviderRecord
+    ) -> PatientRecord:
         pool = self.state.patients
+        age_band = sample_conditional(
+            "provider_taxonomy_age_band",
+            provider.taxonomy_code,
+            fallback="age_band",
+        )
         if pool and len(pool) > 20 and random.random() < _RETURNING_PATIENT_RATE:
-            return random.choice(pool)
+            matching = [
+                patient
+                for patient in pool
+                if age_band_for(patient.dob, day_date) == age_band
+            ]
+            if matching:
+                return random.choice(matching)
 
-        patient = self._create_patient(day_date)
+        patient = self._create_patient(day_date, age_band)
         if len(pool) < _MAX_PATIENT_POOL:
             pool.append(patient)
         else:
             pool[random.randint(0, len(pool) - 1)] = patient
         return patient
 
-    def _create_patient(self, day_date: date) -> PatientRecord:
-        gender: Literal["MALE", "FEMALE"] = random.choice(["MALE", "FEMALE"])
+    def _create_patient(self, day_date: date, age_band: str) -> PatientRecord:
+        gender = cast(
+            Literal["MALE", "FEMALE"],
+            sample_distribution("gender", allowed={"MALE", "FEMALE"}),
+        )
         first = random.choice(FIRST_NAMES[gender])
         last = random.choice(LAST_NAMES)
         middle = random.choice(string.ascii_uppercase)
-        dob = date(
-            day_date.year - random.randint(18, 85),
-            random.randint(1, 12),
-            random.randint(1, 28),
+        dob = generate_birth_date(
+            age_band=age_band,
+            reference_date=day_date,
         )
         city = random.choice(CITIES_STATES)
-        payer = random.choice(COMMON_PAYERS)
-        pos = random.choice(PLACE_OF_SERVICE)
+        payer = sample_payer()
+        pos = place_of_service()
         streets = ["MAIN ST", "OAK AVE", "MAPLE DR", "ELM ST", "PARK BLVD"]
 
         is_self = random.random() < 0.7
@@ -508,33 +534,37 @@ class DailyFeedGenerator:
                     zip_code=org.zip_code,
                 ),
             ),
-            rendering_provider=Provider(
-                entity_role="RENDERING",
-                entity_type="INDIVIDUAL",
-                identification_type="NPI",
-                identifier=provider.npi,
-                last_name_or_org_name=provider.last_name,
-                first_name=provider.first_name,
-                middle_name=provider.middle_initial,
-                address=Address(
-                    line=provider.street,
-                    line2=provider.street2,
-                    city=provider.city,
-                    state_code=provider.state_code,
-                    zip_code=provider.zip_code,
-                ),
-                provider_taxonomy=Code(
-                    sub_type="PROVIDER_TAXONOMY",
-                    code=provider.taxonomy_code,
-                    desc=provider.taxonomy_desc,
-                ),
-            ),
+            rendering_provider=self._provider_party(provider),
             base_service_date=day_date - timedelta(days=random.randint(0, 3)),
             mrn=patient.mrn,
             pos=PlaceOfService(
                 code=patient.pos_code,
                 desc=patient.pos_desc,
                 type=patient.pos_type,
+            ),
+        )
+
+    @staticmethod
+    def _provider_party(provider: ProviderRecord) -> Provider:
+        return Provider(
+            entity_role="RENDERING",
+            entity_type="INDIVIDUAL",
+            identification_type="NPI",
+            identifier=provider.npi,
+            last_name_or_org_name=provider.last_name,
+            first_name=provider.first_name,
+            middle_name=provider.middle_initial,
+            address=Address(
+                line=provider.street,
+                line2=provider.street2,
+                city=provider.city,
+                state_code=provider.state_code,
+                zip_code=provider.zip_code,
+            ),
+            provider_taxonomy=Code(
+                sub_type="PROVIDER_TAXONOMY",
+                code=provider.taxonomy_code,
+                desc=provider.taxonomy_desc,
             ),
         )
 

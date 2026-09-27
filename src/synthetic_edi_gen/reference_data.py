@@ -11,6 +11,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from .stats import catalog, distribution, sample_distribution
+
 
 class PlaceOfService(BaseModel):
     code: str
@@ -18,16 +20,15 @@ class PlaceOfService(BaseModel):
     type: str
 
 
-PLACE_OF_SERVICE: Sequence[PlaceOfService] = (
-    PlaceOfService(code="11", desc="Office", type="OFFICE"),
-    PlaceOfService(code="12", desc="Home", type="HOME"),
-    PlaceOfService(code="21", desc="Inpatient Hospital", type="INPATIENT_HOSPITAL"),
-    PlaceOfService(code="22", desc="Outpatient Hospital", type="OUTPATIENT_HOSPITAL"),
-    PlaceOfService(code="23", desc="Emergency Room - Hospital", type="EMERGENCY_ROOM"),
-    PlaceOfService(code="24", desc="Ambulatory Surgical Center", type="ASC"),
-    PlaceOfService(code="31", desc="Skilled Nursing Facility", type="SNF"),
-    PlaceOfService(code="32", desc="Nursing Facility", type="NURSING_FACILITY"),
+PLACE_OF_SERVICE: Sequence[PlaceOfService] = tuple(
+    PlaceOfService(
+        code=code,
+        desc=catalog("place_of_service")[code],
+        type=catalog("place_of_service")[code].upper().replace(" ", "_"),
+    )
+    for code in distribution("place_of_service")
 )
+_PLACE_OF_SERVICE_BY_CODE = {place.code: place for place in PLACE_OF_SERVICE}
 
 
 class Payer(BaseModel):
@@ -103,6 +104,55 @@ COMMON_PAYERS: Sequence[Payer] = (
         plan_type="MEDICARE_B",
     ),
 )
+
+_FILING_CODE_BY_PLAN = {
+    "AUTOMOBILE_MEDICAL": "AM",
+    "BCBS": "BL",
+    "CHAMPUS": "CH",
+    "COMMERCIAL": "CI",
+    "EPO": "CI",
+    "FEDERAL_EMPLOYEE_PROGRAM": "FI",
+    "HMO": "HM",
+    "HMO_MEDICARE": "MB",
+    "INDEMNITY_INSURANCE": "CI",
+    "MEDICAID": "MC",
+    "MEDICARE_A": "MA",
+    "MEDICARE_B": "MB",
+    "MUTUALLY_DEFINED": "ZZ",
+    "OTHER_FEDERAL": "OF",
+    "OTHER_NON_FEDERAL": "CI",
+    "POS": "CI",
+    "PPO": "CI",
+    "VETERAN_AFFAIRS": "VA",
+    "WORKERS_COMPENSATION": "WC",
+}
+
+
+def _payer_for_plan(plan_type: str) -> Payer:
+    template = COMMON_PAYERS[sum(map(ord, plan_type)) % len(COMMON_PAYERS)]
+    return template.model_copy(
+        update={
+            "claim_filing_code": _FILING_CODE_BY_PLAN[plan_type],
+            "plan_type": plan_type,
+        }
+    )
+
+
+def sample_payer(*, exclude_identifier: str | None = None) -> Payer:
+    """Use observed plan frequencies with synthetic payer identifiers."""
+    allowed = {
+        plan
+        for plan in distribution("insurance_plan_type")
+        if _payer_for_plan(plan).identifier != exclude_identifier
+    }
+    return _payer_for_plan(sample_distribution("insurance_plan_type", allowed=allowed))
+
+
+def place_of_service(code: str | None = None) -> PlaceOfService:
+    code = code or sample_distribution("place_of_service")
+    return _PLACE_OF_SERVICE_BY_CODE[code]
+
+
 type Gender = Literal["FEMALE", "MALE", "UNKNOWN"]
 
 _FEMALE_FIRST_NAMES: Sequence[str] = [

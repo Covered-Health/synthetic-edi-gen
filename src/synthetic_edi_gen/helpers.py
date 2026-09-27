@@ -10,6 +10,7 @@ from datetime import date, timedelta
 from synthetic_edi_gen.edi_models import Address
 
 from .reference_data import CITIES_STATES, FIRST_NAMES, LAST_NAMES, Gender
+from .stats import age_range, sample_distribution
 
 
 def generate_patient_control_number() -> str:
@@ -42,16 +43,25 @@ def generate_person_name(gender: Gender) -> tuple[str, str, str]:
     return first, last, middle
 
 
-def generate_birth_date(min_age: int = 18, max_age: int = 85) -> date:
+def generate_birth_date(
+    min_age: int = 18,
+    max_age: int = 85,
+    *,
+    age_band: str | None = None,
+    reference_date: date | None = None,
+) -> date:
     """Generate a realistic birth date."""
-    today = date.today()
+    today = reference_date or date.today()
+    if age_band is not None:
+        min_age, max_age = age_range(age_band)
     years_ago = random.randint(min_age, max_age)
-    days_offset = random.randint(0, 365)
-    birth_year = today.year - years_ago
-    birth_date = date(birth_year, 1, 1) + timedelta(days=days_offset)
-    # At min_age=0 the offset can land later in the current year than today.
-    # Nobody is born in the future.
-    return min(birth_date, today)
+    birthday_this_year = date(today.year, 1, 1) + timedelta(days=random.randint(0, 364))
+    birth_year = today.year - years_ago - (birthday_this_year > today)
+    try:
+        birthday = birthday_this_year.replace(year=birth_year)
+    except ValueError:  # February 29 into a non-leap birth year
+        birthday = birthday_this_year.replace(year=birth_year, day=28)
+    return min(birthday, today)
 
 
 def generate_address() -> Address:
@@ -140,7 +150,7 @@ def apply_adjustment(amount: float, adjustment_type: str) -> float:
 
 def generate_gender() -> str:
     """Generate a gender (simplified for EDI)."""
-    return random.choice(["MALE", "FEMALE"])
+    return sample_distribution("gender")
 
 
 def format_icd10_code(code: str) -> str:

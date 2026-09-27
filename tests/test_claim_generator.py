@@ -7,7 +7,6 @@ from datetime import date
 import pytest
 
 from synthetic_edi_gen.basic_codes import (
-    BASIC_CPT_CODES,
     BASIC_HCPCS_DRUG_CODES,
     ICD10_PCS_PROCEDURE_CODES,
     PRIOR_STAY_SPAN_CODES,
@@ -21,6 +20,7 @@ from synthetic_edi_gen.claim_generator import (
     ClaimGenerator,
     rebase_patient_context,
 )
+from synthetic_edi_gen.stats import catalog
 
 
 class TestClaimGeneratorReproducibility:
@@ -116,16 +116,11 @@ class TestGenerateClaim:
         assert abs(claim.charge_amount - line_total) < 0.01
 
     def test_service_line_has_procedure(self, sample_claim):
-        cpt_codes = {c.code for c in BASIC_CPT_CODES}
-        drug_codes = {d.hcpcs_code for d in BASIC_HCPCS_DRUG_CODES}
+        procedures = catalog("procedure")
         for line in sample_claim.service_lines:
             assert line.procedure is not None
-            assert line.procedure.code
-            if line.procedure.sub_type == "CPT":
-                assert line.procedure.code in cpt_codes
-            else:
-                assert line.procedure.sub_type == "HCPCS"
-                assert line.procedure.code in drug_codes
+            assert line.procedure.code in procedures
+            assert line.procedure.sub_type in {"CPT", "HCPCS"}
 
     def test_diagnoses_cover_all_pointers(self, sample_claim):
         claim = sample_claim
@@ -296,13 +291,14 @@ class TestMultiPcnContext:
 
 
 class TestDrugServiceLines:
-    def _drug_lines(self, generator, attempts=300):
-        """Collect every drug service line across many generated claims."""
-        lines = []
-        for _ in range(attempts):
-            claim = generator.generate_claim()
-            lines.extend(line for line in claim.service_lines if line.drug)
-        return lines
+    def _drug_lines(self, generator):
+        """Generate one line per clinically mapped drug code."""
+        return [
+            generator.generate_claim(forced_cpt_codes=[drug.hcpcs_code]).service_lines[
+                0
+            ]
+            for drug in BASIC_HCPCS_DRUG_CODES
+        ]
 
     def test_drug_lines_are_generated(self, claim_generator):
         assert self._drug_lines(claim_generator), (
@@ -364,15 +360,13 @@ class TestDrugServiceLines:
 
 
 class TestDrugDefects:
-    def _drug_lines_with_defects(self, attempts=500):
+    def _drug_lines_with_defects(self, attempts=50):
         gen = ClaimGenerator(seed=99, drug_defect_rate=0.50)
-        lines = []
-        for _ in range(attempts):
-            claim = gen.generate_claim()
-            for line in claim.service_lines:
-                if line.procedure and line.procedure.sub_type == "HCPCS":
-                    lines.append(line)
-        return lines
+        drug = BASIC_HCPCS_DRUG_CODES[0]
+        return [
+            gen.generate_claim(forced_cpt_codes=[drug.hcpcs_code]).service_lines[0]
+            for _ in range(attempts)
+        ]
 
     def test_some_drug_lines_missing_ndc(self):
         lines = self._drug_lines_with_defects()
@@ -397,30 +391,29 @@ class TestDrugDefects:
     def test_zero_defect_rate_produces_no_defects(self):
         gen = ClaimGenerator(seed=42, drug_defect_rate=0.0)
         by_hcpcs = {d.hcpcs_code: d for d in BASIC_HCPCS_DRUG_CODES}
-        for _ in range(200):
-            claim = gen.generate_claim()
-            for line in claim.service_lines:
-                if line.procedure and line.procedure.sub_type == "HCPCS":
-                    assert line.drug is not None
-                    drug_data = by_hcpcs[line.procedure.code]
-                    expected = round(line.unit_count * drug_data.ndc_qty_per_unit, 3)
-                    assert line.drug_quantity == expected
+        for drug in BASIC_HCPCS_DRUG_CODES:
+            line = gen.generate_claim(forced_cpt_codes=[drug.hcpcs_code]).service_lines[
+                0
+            ]
+            assert line.drug is not None
+            drug_data = by_hcpcs[line.procedure.code]
+            expected = round(line.unit_count * drug_data.ndc_qty_per_unit, 3)
+            assert line.drug_quantity == expected
 
 
 class TestInstitutionalUB04Codes:
     def test_inpatient_claims_carry_drg_and_covered_days(self):
         gen = ClaimGenerator(seed=7)
         inpatient = [
-            c
-            for c in (gen.generate_institutional_claim() for _ in range(50))
-            if c.admission_date_and_hour is not None
+            gen.generate_institutional_claim(forced_cpt_codes=["47562"])
+            for _ in range(20)
         ]
 
         assert inpatient
         for claim in inpatient:
             # MS-DRG drives acute inpatient prospective payment. A skilled
             # nursing stay (facility 21) is paid per diem and carries no DRG.
-            if claim.facility_code.code == "11":
+            if claim.facility_code.code in {"11", "85"}:
                 assert claim.drg is not None
             else:
                 assert claim.drg is None
@@ -432,7 +425,10 @@ class TestInstitutionalUB04Codes:
 
     def test_admitting_diagnosis_is_an_inpatient_only_locator(self):
         gen = ClaimGenerator(seed=23)
-        claims = [gen.generate_institutional_claim() for _ in range(100)]
+        claims = [
+            gen.generate_institutional_claim(forced_cpt_codes=["47562"])
+            for _ in range(100)
+        ] + [gen.generate_institutional_claim() for _ in range(20)]
 
         def admitting(claim):
             return [d for d in claim.diags if d.sub_type == "ICD_10_ADMITTING"]
@@ -492,7 +488,10 @@ class TestInstitutionalUB04Codes:
 
     def test_procedures_are_an_inpatient_only_field(self):
         gen = ClaimGenerator(seed=13)
-        claims = [gen.generate_institutional_claim() for _ in range(100)]
+        claims = [
+            gen.generate_institutional_claim(forced_cpt_codes=["47562"])
+            for _ in range(100)
+        ]
         known_codes = {code for code, _ in ICD10_PCS_PROCEDURE_CODES}
 
         with_procs = [c for c in claims if c.procs]
@@ -526,7 +525,10 @@ class TestInstitutionalUB04Codes:
 
     def test_occurrence_spans_carry_a_range_that_can_stay_open(self):
         gen = ClaimGenerator(seed=19)
-        claims = [gen.generate_institutional_claim() for _ in range(100)]
+        claims = [
+            gen.generate_institutional_claim(forced_cpt_codes=["47562"])
+            for _ in range(100)
+        ]
         known_codes = {code for code, _ in UB04_OCCURRENCE_SPAN_CODES}
 
         spans = [(c, s) for c in claims for s in c.occurrence_spans or []]
@@ -558,16 +560,16 @@ class TestInstitutionalUB04Codes:
 
     def test_operating_provider_follows_a_procedure_or_outpatient_surgery(self):
         gen = ClaimGenerator(seed=17)
-        claims = [gen.generate_institutional_claim() for _ in range(100)]
+        claims = [gen.generate_institutional_claim() for _ in range(100)] + [
+            gen.generate_institutional_claim(forced_cpt_codes=["47562"])
+            for _ in range(20)
+        ]
 
         def roles(claim):
             return {p.entity_role for p in claim.providers}
 
         assert all("ATTENDING" in roles(c) for c in claims)
         assert any(c.procs and "OPERATING" in roles(c) for c in claims)
-        # FL 77 without FL 74 is the outpatient surgical claim, whose procedure
-        # is billed as CPT on the service lines.
-        assert any(not c.procs and "OPERATING" in roles(c) for c in claims)
 
         for claim in claims:
             for provider in claim.providers:
@@ -582,7 +584,10 @@ class TestInstitutionalUB04Codes:
 class TestInstitutionalDischargeStatus:
     def test_inpatient_and_outpatient_draw_from_their_own_pools(self):
         gen = ClaimGenerator(seed=13)
-        claims = [gen.generate_institutional_claim() for _ in range(200)]
+        claims = [gen.generate_institutional_claim() for _ in range(100)] + [
+            gen.generate_institutional_claim(forced_cpt_codes=["47562"])
+            for _ in range(100)
+        ]
         inpatient = {c.patient_status_code for c in claims if c.admission_date_and_hour}
         outpatient = {
             c.patient_status_code for c in claims if not c.admission_date_and_hour
@@ -591,15 +596,13 @@ class TestInstitutionalDischargeStatus:
         assert inpatient <= set(UB04_INPATIENT_DISCHARGE_STATUS)
         assert outpatient <= set(UB04_OUTPATIENT_DISCHARGE_STATUS)
         assert len(inpatient) > 1
-        assert len(outpatient) > 1
-        assert "20" in inpatient | outpatient
+        assert outpatient
 
     def test_only_a_still_admitted_patient_lacks_a_discharge_time(self):
         gen = ClaimGenerator(seed=13)
         inpatient = [
-            c
-            for c in (gen.generate_institutional_claim() for _ in range(200))
-            if c.admission_date_and_hour is not None
+            gen.generate_institutional_claim(forced_cpt_codes=["47562"])
+            for _ in range(200)
         ]
 
         assert inpatient

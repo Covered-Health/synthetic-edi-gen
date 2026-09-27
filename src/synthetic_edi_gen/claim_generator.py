@@ -33,10 +33,8 @@ from synthetic_edi_gen.edi_models import (
 
 from .basic_codes import (
     ACUTE_INPATIENT_FACILITY,
-    BASIC_CPT_CODES,
     BASIC_HCPCS_DRUG_CODES,
-    BASIC_ICD10_CODES,
-    BASIC_MODIFIERS,
+    EITHER_FACILITY_TYPES,
     EXCLUSIVE_CONDITION_PAIRS,
     EXCLUSIVE_OCCURRENCE_PAIRS,
     EXPIRED_DISCHARGE_STATUSES,
@@ -48,17 +46,15 @@ from .basic_codes import (
     INPATIENT_ONLY_SPAN_CODES,
     INPATIENT_ONLY_VALUE_CODES,
     MS_DRG_CODES,
+    OUTPATIENT_FACILITY_TYPES,
     OUTPATIENT_ONLY_CONDITION_CODES,
     PRIOR_STAY_SPAN_CODES,
     SNF_FACILITY,
     SNF_ONLY_OCCURRENCE_SPAN_CODES,
     TRANSFER_DISCHARGE_STATUSES,
     UB04_CONDITION_CODES,
-    UB04_FACILITY_TYPES,
-    UB04_INPATIENT_DISCHARGE_STATUS,
     UB04_OCCURRENCE_CODES,
     UB04_OCCURRENCE_SPAN_CODES,
-    UB04_OUTPATIENT_DISCHARGE_STATUS,
     UB04_VALUE_CODES,
     UNSUPPORTED_CONDITION_CODES,
     UNSUPPORTED_OCCURRENCE_CODES,
@@ -80,13 +76,25 @@ from .helpers import (
 )
 from .reference_data import (
     CITIES_STATES,
-    COMMON_PAYERS,
     FIRST_NAMES,
     LAST_NAMES,
-    PLACE_OF_SERVICE,
     Gender,
     Payer,
     PlaceOfService,
+    place_of_service,
+    sample_payer,
+)
+from .stats import (
+    age_band_for,
+    catalog,
+    code_description,
+    ratio,
+    sample_conditional,
+    sample_correlated,
+    sample_count,
+    sample_distribution,
+    sample_numeric,
+    sample_presence,
 )
 
 ClaimT = TypeVar("ClaimT", ProfClaim, InstClaim)
@@ -96,19 +104,12 @@ T = TypeVar("T")
 # outpatient encounter, however the claim type would otherwise have been drawn.
 _INPATIENT_CPT_CODES = {"27447", "47562", "29881", "49505"}
 
-# Share of inpatient stays admitted and discharged on the same calendar day.
-_SAME_DAY_STAY_RATE = 0.05
-
 # How often a claim reports occurrence spans at all. Outpatient bills are gated
 # lower because 73 is the only span reportable on one: at the inpatient rate,
 # every outpatient claim that passed the gate would emit a 73 and that single
 # code would be the majority of all spans generated.
 _SPAN_REPORT_RATE = 0.35
 _OUTPATIENT_SPAN_REPORT_RATE = 0.08
-
-# Fraction of (non-forced) service lines that bill an administered drug, where
-# the line carries a HCPCS J/Q-code procedure plus the drug's NDC information.
-DRUG_LINE_PROBABILITY = 0.12
 
 _INST_REVENUE_CODES: dict[str, tuple[str, str]] = {
     "clinic": ("0510", "Clinic"),
@@ -120,174 +121,11 @@ _INST_REVENUE_CODES: dict[str, tuple[str, str]] = {
     "room": ("0120", "Room and board - semi-private"),
 }
 
-_INST_REVENUE_BY_SPECIALTY = {
-    "Laboratory": _INST_REVENUE_CODES["lab"],
-    "Radiology": _INST_REVENUE_CODES["radiology"],
-    "Orthopedics": _INST_REVENUE_CODES["operating_room"],
-    "General Surgery": _INST_REVENUE_CODES["operating_room"],
-}
-
-RENDERING_PROVIDER_TAXONOMIES = [
-    # Primary Care
-    ("207Q00000X", "Family Medicine Physician"),
-    ("207QA0505X", "Adult Medicine"),
-    ("207QA0000X", "Adolescent Medicine"),
-    ("207QG0300X", "Geriatric Medicine"),
-    ("207QS0010X", "Sports Medicine"),
-    ("207R00000X", "Internal Medicine Physician"),
-    ("208D00000X", "General Practice Physician"),
-    ("208000000X", "Pediatrics Physician"),
-    ("2080P0006X", "Developmental-Behavioral Pediatrics"),
-    ("2080N0001X", "Neonatal-Perinatal Medicine"),
-    # Surgery
-    ("208600000X", "Surgery Physician"),
-    ("2086S0120X", "Pediatric Surgery"),
-    ("2086S0105X", "Surgery of the Hand"),
-    ("2086S0122X", "Plastic and Reconstructive Surgery"),
-    ("2086X0206X", "Surgical Oncology"),
-    ("207X00000X", "Orthopaedic Surgery Physician"),
-    ("207XS0114X", "Adult Reconstructive Orthopaedic Surgery"),
-    ("207XS0106X", "Orthopaedic Hand Surgery"),
-    ("207XX0004X", "Orthopaedic Foot and Ankle Surgery"),
-    ("207XX0801X", "Orthopaedic Sports Medicine"),
-    ("208C00000X", "Colon and Rectal Surgery"),
-    ("204C00000X", "Neurological Surgery"),
-    ("208200000X", "Plastic Surgery"),
-    ("208G00000X", "Thoracic Surgery"),
-    ("207T00000X", "Neurological Surgery Physician"),
-    # Cardiovascular
-    ("207RC0000X", "Cardiovascular Disease Physician"),
-    ("207RI0011X", "Interventional Cardiology"),
-    ("207RC0200X", "Critical Care Medicine (Internal Medicine)"),
-    ("207RC0001X", "Clinical Cardiac Electrophysiology"),
-    # Gastroenterology
-    ("207RG0100X", "Gastroenterology Physician"),
-    ("207RG0300X", "Hepatology Physician"),
-    # Pulmonology
-    ("207RP1001X", "Pulmonary Disease Physician"),
-    ("207RT0003X", "Pulmonary Critical Care"),
-    # Neurology & Psychiatry
-    ("2084N0400X", "Neurology Physician"),
-    ("2084N0402X", "Neuromuscular Medicine"),
-    ("2084P0802X", "Addiction Psychiatry"),
-    ("2084P0800X", "Psychiatry Physician"),
-    ("2084P0804X", "Child and Adolescent Psychiatry"),
-    ("2084F0202X", "Forensic Psychiatry"),
-    ("2084P0805X", "Geriatric Psychiatry"),
-    ("2084B0002X", "Obesity Medicine (Psychiatry)"),
-    # Radiology
-    ("2085R0202X", "Diagnostic Radiology Physician"),
-    ("2085R0001X", "Radiation Oncology"),
-    ("2085U0001X", "Diagnostic Ultrasound"),
-    ("2085N0700X", "Neuroradiology"),
-    ("2085R0204X", "Vascular and Interventional Radiology"),
-    # OB/GYN
-    ("207V00000X", "Obstetrics & Gynecology Physician"),
-    ("207VX0201X", "Gynecologic Oncology"),
-    ("207VG0400X", "Gynecology Physician"),
-    ("207VM0101X", "Maternal and Fetal Medicine"),
-    ("207VX0000X", "Obstetrics Physician"),
-    ("207VE0102X", "Reproductive Endocrinology"),
-    # ENT
-    ("207Y00000X", "Otolaryngology Physician"),
-    ("207YX0602X", "Otolaryngic Allergy"),
-    ("207YS0123X", "Facial Plastic Surgery"),
-    # Endocrinology & Metabolism
-    ("207RE0101X", "Endocrinology Physician"),
-    ("207RD0900X", "Diabetes & Metabolism"),
-    # Hematology & Oncology
-    ("207RH0003X", "Hematology & Oncology Physician"),
-    ("207RH0000X", "Hematology Physician"),
-    ("207RX0202X", "Medical Oncology"),
-    # Nephrology
-    ("207RN0300X", "Nephrology Physician"),
-    # Rheumatology
-    ("207RR0500X", "Rheumatology Physician"),
-    # Infectious Disease
-    ("207RI0200X", "Infectious Disease Physician"),
-    # Allergy & Immunology
-    ("207K00000X", "Allergy & Immunology Physician"),
-    ("207KA0200X", "Allergy Physician"),
-    ("207KI0005X", "Clinical & Laboratory Immunology"),
-    # Dermatology
-    ("207N00000X", "Dermatology Physician"),
-    ("207NI0002X", "Clinical & Laboratory Dermatological Immunology"),
-    ("207ND0101X", "MOHS-Micrographic Surgery"),
-    ("207NP0225X", "Pediatric Dermatology"),
-    ("207NS0135X", "Procedural Dermatology"),
-    # Ophthalmology
-    ("207W00000X", "Ophthalmology Physician"),
-    ("207WX0200X", "Ophthalmic Plastic and Reconstructive Surgery"),
-    ("207WX0009X", "Glaucoma Specialist"),
-    ("207WX0107X", "Retina Specialist"),
-    # Urology
-    ("208800000X", "Urology Physician"),
-    ("2088P0231X", "Pediatric Urology"),
-    ("2088F0040X", "Female Pelvic Medicine and Reconstructive Surgery"),
-    # Anesthesiology
-    ("207L00000X", "Anesthesiology Physician"),
-    ("207LA0401X", "Addiction Medicine (Anesthesiology)"),
-    ("207LC0200X", "Critical Care Medicine (Anesthesiology)"),
-    ("207LP2900X", "Pain Medicine"),
-    # Emergency Medicine
-    ("207P00000X", "Emergency Medicine Physician"),
-    ("207PE0004X", "Emergency Medical Services"),
-    ("207PS0010X", "Sports Medicine (Emergency Medicine)"),
-    ("207PT0002X", "Medical Toxicology (Emergency Medicine)"),
-    # Pathology
-    ("207ZP0101X", "Anatomic Pathology"),
-    ("207ZP0102X", "Anatomic Pathology & Clinical Pathology"),
-    ("207ZP0104X", "Chemical Pathology"),
-    ("207ZP0105X", "Clinical Pathology/Laboratory Medicine"),
-    ("207ZD0900X", "Dermatopathology"),
-    # Physical Medicine & Rehabilitation
-    ("208100000X", "Physical Medicine & Rehabilitation"),
-    ("2081P2900X", "Pain Medicine (PM&R)"),
-    ("2081P0010X", "Pediatric Rehabilitation Medicine"),
-    ("2081S0010X", "Sports Medicine (PM&R)"),
-    # Preventive Medicine
-    ("2083P0500X", "Preventive Medicine/Occupational-Environmental Medicine"),
-    ("2083P0901X", "Public Health & General Preventive Medicine"),
-    ("2083X0100X", "Occupational Medicine"),
-    # Nuclear Medicine
-    ("207U00000X", "Nuclear Medicine Physician"),
-    ("207UN0903X", "In Vivo & In Vitro Nuclear Medicine"),
-    ("207UN0901X", "Nuclear Cardiology"),
-    # Non-Physician Clinicians
-    ("363L00000X", "Nurse Practitioner"),
-    ("363LA2200X", "Adult Health Nurse Practitioner"),
-    ("363LF0000X", "Family Nurse Practitioner"),
-    ("363LP0200X", "Pediatric Nurse Practitioner"),
-    ("363LP0808X", "Psych/Mental Health Nurse Practitioner"),
-    ("363LW0102X", "Women's Health Nurse Practitioner"),
-    ("363LC1500X", "Community Health Nurse Practitioner"),
-    ("363A00000X", "Physician Assistant"),
-    ("363AM0700X", "Medical Physician Assistant"),
-    ("363AS0400X", "Surgical Physician Assistant"),
-    ("364S00000X", "Clinical Nurse Specialist"),
-    ("367A00000X", "Advanced Practice Midwife"),
-    ("367500000X", "Certified Registered Nurse Anesthetist"),
-    # Therapy & Rehab
-    ("225100000X", "Physical Therapist"),
-    ("225200000X", "Physical Therapy Assistant"),
-    ("225500000X", "Respiratory Therapist"),
-    ("225600000X", "Dance Therapist"),
-    ("221700000X", "Art Therapist"),
-    ("225X00000X", "Occupational Therapist"),
-    # Behavioral Health
-    ("101Y00000X", "Counselor"),
-    ("101YA0400X", "Addiction Counselor"),
-    ("101YM0800X", "Mental Health Counselor"),
-    ("101YP2500X", "Professional Counselor"),
-    ("102L00000X", "Psychoanalyst"),
-    ("103T00000X", "Psychologist"),
-    ("103TA0400X", "Addiction Psychologist"),
-    ("103TC0700X", "Clinical Psychologist"),
-    ("104100000X", "Social Worker"),
-    ("1041C0700X", "Clinical Social Worker"),
+SURGICAL_TAXONOMIES = [
+    (code, desc)
+    for code, desc in catalog("provider_taxonomy").items()
+    if "surg" in desc.lower()
 ]
-
-SURGICAL_TAXONOMIES = [t for t in RENDERING_PROVIDER_TAXONOMIES if "Surg" in t[1]]
 
 
 @dataclass
@@ -319,7 +157,7 @@ class PatientContext:
     base_service_date: date
     institutional_billing_provider: Provider | None = None
     mrn: str | None = None
-    pos: PlaceOfService = field(default_factory=lambda: random.choice(PLACE_OF_SERVICE))
+    pos: PlaceOfService = field(default_factory=place_of_service)
 
 
 @dataclass(frozen=True)
@@ -388,6 +226,9 @@ class ClaimGenerator:
             random.seed(seed)
         self.generated_pcns: set[str] = set()
         self._drug_defect_rate = drug_defect_rate
+        self._rendering_providers: list[Provider] = []
+        self._billing_provider: Provider | None = None
+        self._institutional_billing_provider: Provider | None = None
 
     def generate_patient_context(
         self,
@@ -398,18 +239,27 @@ class ClaimGenerator:
         Used to create a reusable context so multiple claims (PCNs) belonging
         to the same HAR group share identical demographics.
         """
-        payer_info = random.choice(COMMON_PAYERS)
         base_service_date = service_date or generate_service_date(
             days_ago_min=1, days_ago_max=90
         )
-
+        payer_info = sample_payer()
+        rendering_provider = self._pick_or_generate_rendering_provider()
+        taxonomy = rendering_provider.provider_taxonomy
+        age_band = sample_conditional(
+            "provider_taxonomy_age_band",
+            taxonomy.code if taxonomy else "",
+            fallback="age_band",
+        )
         patient_gender = cast(Gender, generate_gender())
         patient_first, patient_last, patient_middle = generate_person_name(
             patient_gender
         )
         # A newborn's birth date can otherwise fall after the encounter it is
         # being billed for.
-        patient_dob = min(generate_birth_date(min_age=0, max_age=85), base_service_date)
+        patient_dob = generate_birth_date(
+            age_band=age_band,
+            reference_date=base_service_date,
+        )
         patient_address = generate_address()
 
         is_self = random.random() < 0.7
@@ -430,6 +280,13 @@ class ClaimGenerator:
             subscriber_dob = generate_birth_date(min_age=25, max_age=75)
             relationship = random.choice(["CHILD", "SPOUSE", "OTHER"])
 
+        if self._billing_provider is None:
+            self._billing_provider = self._generate_billing_provider()
+        if self._institutional_billing_provider is None:
+            self._institutional_billing_provider = (
+                self._generate_institutional_billing_provider()
+            )
+
         return PatientContext(
             patient_first=patient_first,
             patient_last=patient_last,
@@ -447,9 +304,9 @@ class ClaimGenerator:
             member_id=generate_member_id(),
             group_or_policy_number=generate_member_id()[:10],
             payer_info=payer_info,
-            billing_provider=self._generate_billing_provider(),
-            institutional_billing_provider=self._generate_institutional_billing_provider(),
-            rendering_provider=self._generate_rendering_provider(),
+            billing_provider=self._billing_provider,
+            institutional_billing_provider=self._institutional_billing_provider,
+            rendering_provider=rendering_provider,
             base_service_date=base_service_date,
         )
 
@@ -481,37 +338,33 @@ class ClaimGenerator:
         if forced_cpt_codes:
             num_lines = len(forced_cpt_codes)
         else:
-            num_lines = random.choices([1, 2, 3, 4], weights=[50, 30, 15, 5])[0]
+            num_lines = sample_count(
+                "service_lines_per_claim",
+                correlation=("claim_type_service_lines_per_claim", "PROF"),
+                minimum=1,
+            )
 
         service_lines: list[ProfLine] = []
-        total_charge = 0.0
 
         for i in range(num_lines):
             forced_code = forced_cpt_codes[i] if forced_cpt_codes else None
-            line = self._generate_service_line(i + 1, svc_date, forced_cpt=forced_code)
+            line = self._generate_service_line(
+                i + 1,
+                svc_date,
+                ctx,
+                forced_cpt=forced_code,
+            )
             service_lines.append(line)
-            total_charge += line.charge_amount
-
-        # Build diagnoses, then clamp service-line pointers so they never
-        # exceed the actual number of diagnosis codes on the claim.
-        used_diag_codes: set[int] = set()
-        for line in service_lines:
-            if line.diag_pointers:
-                used_diag_codes.update(line.diag_pointers)
+        self._scale_claim_charges(service_lines, "PROF")
+        total_charge = sum(line.charge_amount for line in service_lines)
 
         if forced_icd10_codes:
             diags = self._build_forced_diagnoses(forced_icd10_codes)
+            for line in service_lines:
+                line.diag_pointers = list(range(1, min(3, len(diags)) + 1))
         else:
-            diags = self._generate_diagnoses(list(used_diag_codes))
-
-        # Clamp pointers to valid range [1 .. len(diags)]
-        max_ptr = len(diags)
-        for line in service_lines:
-            if line.diag_pointers:
-                line.diag_pointers = sorted(
-                    {min(p, max_ptr) for p in line.diag_pointers}
-                )
-        pos = ctx.pos
+            diags = self._generate_diagnoses(service_lines, ctx, svc_date)
+        pos = place_of_service(service_lines[0].place_of_service_code)
 
         return ProfClaim(
             id=str(uuid.uuid4()).replace("-", "")[:24],
@@ -538,7 +391,7 @@ class ClaimGenerator:
             release_of_information_code="Y",
             medical_record_number=ctx.mrn,
             billing_provider=ctx.billing_provider,
-            providers=[ctx.rendering_provider],
+            providers=self._providers_for_claim(ctx),
             diags=diags,
             service_lines=service_lines,
             transaction=self._generate_transaction(pcn),
@@ -558,22 +411,24 @@ class ClaimGenerator:
         pcn = self._generate_unique_pcn()
         svc_date = service_date or ctx.base_service_date
         is_inpatient = self._is_inpatient_inst_claim(forced_cpt_codes)
-        # A same-day admit/discharge is real, and it is the only shape in which
-        # condition 40 (same day transfer) can be reported — but it is uncommon.
-        # A flat randint(0, 5) would make one inpatient stay in six a zero-night
-        # stay, which is not a length-of-stay distribution anyone would believe.
-        stay_days = (
-            (0 if random.random() < _SAME_DAY_STAY_RATE else random.randint(1, 5))
-            if is_inpatient and not forced_cpt_codes
-            else 0
+        classification = "inpatient" if is_inpatient else "outpatient"
+        stay_days = sample_count(
+            "length_of_stay_days",
+            correlation=(
+                "inpatient_classification_length_of_stay",
+                classification,
+            ),
         )
         statement_to = svc_date + timedelta(days=stay_days)
 
         service_lines = self._generate_institutional_service_lines(
             svc_date,
             stay_days + 1,
+            ctx,
+            is_inpatient,
             forced_cpt_codes=forced_cpt_codes,
         )
+        self._scale_claim_charges(service_lines, "INST")
         total_charge = sum(line.charge_amount for line in service_lines)
 
         if forced_icd10_codes:
@@ -582,7 +437,12 @@ class ClaimGenerator:
                 include_poa=is_inpatient,
             )
         else:
-            diags = self._generate_inst_diagnoses(include_poa=is_inpatient)
+            diags = self._generate_inst_diagnoses(
+                service_lines,
+                ctx,
+                svc_date,
+                include_poa=is_inpatient,
+            )
         diags += self._generate_admitting_diagnosis(is_inpatient, diags[0])
         diags += self._generate_reason_for_visit_diagnoses(is_inpatient)
 
@@ -635,12 +495,12 @@ class ClaimGenerator:
             medical_record_number=ctx.mrn,
             admission_date_and_hour=admission_dt,
             discharge_time=discharge_dt,
-            admission_type_code=random.choice(["1", "2", "3"])
-            if is_inpatient
-            else None,
-            admission_source_code=random.choice(["1", "2", "7"])
-            if is_inpatient
-            else None,
+            admission_type_code=(
+                sample_distribution("admission_type") if is_inpatient else None
+            ),
+            admission_source_code=(
+                sample_distribution("admission_source") if is_inpatient else None
+            ),
             patient_status_code=patient_status,
             billing_provider=ctx.institutional_billing_provider or ctx.billing_provider,
             providers=[
@@ -719,97 +579,157 @@ class ClaimGenerator:
                 self.generated_pcns.add(pcn)
                 return pcn
 
+    @staticmethod
+    def _sample_procedure(
+        ctx: PatientContext,
+        service_date: date,
+        claim_type: Literal["PROF", "INST"],
+    ) -> str:
+        taxonomy = ctx.rendering_provider.provider_taxonomy
+        return sample_correlated(
+            "procedure",
+            (
+                ("claim_type_procedure", claim_type),
+                ("provider_taxonomy_procedure", taxonomy.code if taxonomy else ""),
+                ("age_band_procedure", age_band_for(ctx.patient_dob, service_date)),
+                ("gender_procedure", ctx.patient_gender),
+                ("insurance_plan_procedure", ctx.payer_info.plan_type),
+            ),
+        )
+
+    @staticmethod
+    def _scale_claim_charges(
+        lines: list[ProfLine] | list[InstLine],
+        claim_type: Literal["PROF", "INST"],
+    ) -> None:
+        target = max(
+            0.01 * len(lines),
+            sample_numeric(
+                "claim_charge_bucket",
+                conditions=(("claim_type_claim_charge_bucket", claim_type),),
+            ),
+        )
+        current = sum(line.charge_amount for line in lines)
+        if current <= 0:
+            return
+        factor = target / current
+        for line in lines:
+            line.charge_amount = max(0.01, round(line.charge_amount * factor, 2))
+
     def _generate_service_line(
         self,
         line_num: int,
         service_date: date,
+        ctx: PatientContext,
         forced_cpt: str | None = None,
     ) -> ProfLine:
-        """Generate a single service line.
-
-        Most lines bill a CPT procedure, but a minority bill a clinician-
-        administered drug: a HCPCS J/Q-code procedure carrying the drug's NDC,
-        quantity, and unit of measure (see ``_generate_drug_service_line``).
-        """
-        drug_data = self._select_drug_for_line(forced_cpt)
+        """Generate one empirically weighted professional service line."""
+        procedure_code = forced_cpt or self._sample_procedure(ctx, service_date, "PROF")
+        drug_data = self._select_drug_for_line(procedure_code)
         if drug_data is not None:
-            line = self._generate_drug_service_line(line_num, service_date, drug_data)
+            line = self._generate_drug_service_line(
+                line_num, service_date, drug_data, procedure_code
+            )
             if self._drug_defect_rate > 0 and random.random() < self._drug_defect_rate:
                 self._apply_drug_defect(line)
             return line
 
-        # Select a CPT code
-        if forced_cpt:
-            matches = [c for c in BASIC_CPT_CODES if c.code == forced_cpt]
-            cpt_data = matches[0] if matches else random.choice(BASIC_CPT_CODES)
-        else:
-            cpt_data = random.choice(BASIC_CPT_CODES)
-
-        # Generate charge amount
-        charge = random_float(cpt_data.min_cost, cpt_data.max_cost)
-
-        # Generate unit count (usually 1)
-        units = 1
-        if random.random() < 0.1:  # 10% chance of multiple units
-            units = random.randint(2, 5)
-
-        # Sometimes add modifiers
+        charge = sample_numeric(
+            "line_charge_bucket",
+            conditions=(
+                ("claim_type_procedure_charge_bucket", ("PROF", procedure_code)),
+                ("procedure_charge_bucket", procedure_code),
+            ),
+        )
+        units = max(
+            0.1,
+            sample_numeric(
+                "unit_count_bucket",
+                conditions=(("procedure_unit_count_bucket", procedure_code),),
+                precision=2,
+            ),
+        )
         modifiers: list[Code] | None = None
-        if random.random() < 0.2:  # 20% chance of modifiers
-            num_modifiers = random.randint(1, 2)
-            selected_modifiers = random.sample(
-                BASIC_MODIFIERS, min(num_modifiers, len(BASIC_MODIFIERS))
-            )
+        modifier_count = (
+            sample_count("modifier_count_per_line")
+            if sample_presence("line_has_modifier")
+            else 0
+        )
+        if modifier_count:
+            selected_modifiers: list[str] = []
+            while len(selected_modifiers) < modifier_count:
+                available = set(catalog("modifier")) - set(selected_modifiers)
+                if not available:
+                    break
+                modifier = sample_correlated(
+                    "modifier",
+                    (
+                        ("procedure_modifier", procedure_code),
+                        ("claim_type_modifier", "PROF"),
+                    ),
+                    allowed=available,
+                )
+                selected_modifiers.append(modifier)
             modifiers = [
                 Code(
                     sub_type="HCPCS_MODIFIER",
-                    code=mod["code"],
-                    desc=mod["description"],
+                    code=modifier,
+                    desc=code_description("modifier", modifier),
                 )
-                for mod in selected_modifiers
+                for modifier in selected_modifiers
             ]
-
-        # Select diagnosis pointers (1-3 diagnoses per line)
-        num_diags = random.randint(1, min(3, len(cpt_data.common_icd10)))
-        diag_pointers = list(range(1, num_diags + 1))
 
         return ProfLine(
             source_line_id=f"LINE{line_num}",
-            charge_amount=float(charge * units),
+            charge_amount=max(0.01, float(charge)),
             service_date_from=service_date,
+            place_of_service_code=sample_conditional(
+                "procedure_place_of_service",
+                procedure_code,
+                fallback="place_of_service",
+            ),
             unit_type="UNIT",
             unit_count=float(units),
             procedure=Procedure(
-                sub_type="CPT",
-                code=cpt_data.code,
-                desc=cpt_data.description,
+                sub_type="CPT" if procedure_code.isdigit() else "HCPCS",
+                code=procedure_code,
+                desc=code_description("procedure", procedure_code),
                 modifiers=modifiers,
             ),
-            diag_pointers=diag_pointers,
+            diag_pointers=[],
         )
 
     def _generate_institutional_service_lines(
         self,
         service_date: date,
         stay_days: int,
+        ctx: PatientContext,
+        is_inpatient: bool,
         forced_cpt_codes: list[str] | None = None,
     ) -> list[InstLine]:
         if forced_cpt_codes:
             return [
-                self._generate_institutional_service_line(i + 1, service_date, code)
+                self._generate_institutional_service_line(
+                    i + 1, service_date, ctx, code
+                )
                 for i, code in enumerate(forced_cpt_codes)
             ]
 
         lines: list[InstLine] = []
-        if stay_days > 1:
+        if is_inpatient and stay_days > 1:
             lines.append(self._generate_room_and_board_line(1, service_date, stay_days))
 
-        num_ancillary = random.choices([1, 2, 3, 4], weights=[35, 35, 20, 10])[0]
+        num_ancillary = sample_count(
+            "service_lines_per_claim",
+            correlation=("claim_type_service_lines_per_claim", "INST"),
+            minimum=1,
+        ) - len(lines)
         for _ in range(num_ancillary):
             lines.append(
                 self._generate_institutional_service_line(
                     len(lines) + 1,
                     service_date + timedelta(days=random.randint(0, stay_days - 1)),
+                    ctx,
                 )
             )
         return lines
@@ -821,7 +741,7 @@ class ClaimGenerator:
         stay_days: int,
     ) -> InstLine:
         rev_code, rev_desc = _INST_REVENUE_CODES["room"]
-        charge = random_float(900.0, 2500.0) * stay_days
+        charge = sample_numeric("line_charge_bucket")
         return InstLine(
             source_line_id=f"LINE{line_num}",
             charge_amount=float(round(charge, 2)),
@@ -836,27 +756,33 @@ class ClaimGenerator:
             ),
         )
 
-    @staticmethod
     def _generate_institutional_service_line(
+        self,
         line_num: int,
         service_date: date,
+        ctx: PatientContext,
         forced_cpt: str | None = None,
     ) -> InstLine:
-        if forced_cpt:
-            matches = [c for c in BASIC_CPT_CODES if c.code == forced_cpt]
-            cpt_data = matches[0] if matches else random.choice(BASIC_CPT_CODES)
-        else:
-            cpt_data = random.choice(BASIC_CPT_CODES)
-
-        rev_code, rev_desc = _INST_REVENUE_BY_SPECIALTY.get(
-            cpt_data.specialty,
-            _INST_REVENUE_CODES["clinic"],
+        procedure_code = forced_cpt or self._sample_procedure(ctx, service_date, "INST")
+        revenue_code = sample_conditional(
+            "procedure_revenue_code",
+            procedure_code,
+            fallback="revenue_code",
         )
-        units = random.randint(2, 5) if random.random() < 0.08 else 1
-        charge = (
-            random_float(cpt_data.min_cost, cpt_data.max_cost)
-            * random_float(1.4, 3.5)
-            * units
+        units = max(
+            0.1,
+            sample_numeric(
+                "unit_count_bucket",
+                conditions=(("procedure_unit_count_bucket", procedure_code),),
+                precision=2,
+            ),
+        )
+        charge = sample_numeric(
+            "line_charge_bucket",
+            conditions=(
+                ("claim_type_procedure_charge_bucket", ("INST", procedure_code)),
+                ("procedure_charge_bucket", procedure_code),
+            ),
         )
 
         return InstLine(
@@ -868,39 +794,30 @@ class ClaimGenerator:
             unit_count=float(units),
             revenue_code=Code(
                 sub_type="REVENUE_CODE",
-                code=rev_code,
-                desc=rev_desc,
+                code=revenue_code,
+                desc=code_description("revenue_code", revenue_code),
             ),
             procedure=Procedure(
-                sub_type="CPT",
-                code=cpt_data.code,
-                desc=cpt_data.description,
+                sub_type="CPT" if procedure_code.isdigit() else "HCPCS",
+                code=procedure_code,
+                desc=code_description("procedure", procedure_code),
             ),
         )
 
     @staticmethod
     def _select_drug_for_line(forced_cpt: str | None) -> BasicHCPCSDrugCode | None:
-        """Decide whether a line bills an administered drug, and which one.
-
-        When a procedure code is forced, a drug line is produced only if that
-        code is a known HCPCS drug code (so callers can request drug lines
-        explicitly). Otherwise a drug line is chosen at random a fraction of
-        the time.
-        """
-        if forced_cpt is not None:
-            return next(
-                (d for d in BASIC_HCPCS_DRUG_CODES if d.hcpcs_code == forced_cpt),
-                None,
-            )
-        if random.random() < DRUG_LINE_PROBABILITY:
-            return random.choice(BASIC_HCPCS_DRUG_CODES)
-        return None
+        """Return NDC metadata when the empirically selected code has it."""
+        return next(
+            (d for d in BASIC_HCPCS_DRUG_CODES if d.hcpcs_code == forced_cpt),
+            None,
+        )
 
     @staticmethod
     def _generate_drug_service_line(
         line_num: int,
         service_date: date,
         drug_data: BasicHCPCSDrugCode,
+        procedure_code: str,
     ) -> ProfLine:
         """Generate a service line that bills a clinician-administered drug.
 
@@ -909,17 +826,27 @@ class ClaimGenerator:
         the billed unit count and the J-code's per-unit dosing so the reported
         drug quantity stays consistent with the procedure and units.
         """
-        units = random.randint(1, drug_data.max_units) if drug_data.max_units > 1 else 1
-
-        charge = random_float(drug_data.min_cost, drug_data.max_cost) * units
+        units = min(
+            drug_data.max_units,
+            max(
+                1,
+                round(
+                    sample_numeric(
+                        "unit_count_bucket",
+                        conditions=(("procedure_unit_count_bucket", procedure_code),),
+                    )
+                ),
+            ),
+        )
+        charge = sample_numeric(
+            "line_charge_bucket",
+            conditions=(("procedure_charge_bucket", procedure_code),),
+        )
         drug_quantity = round(units * drug_data.ndc_qty_per_unit, 3)
-
-        num_diags = random.randint(1, min(3, len(drug_data.common_icd10)))
-        diag_pointers = list(range(1, num_diags + 1))
 
         return ProfLine(
             source_line_id=f"LINE{line_num}",
-            charge_amount=float(round(charge, 2)),
+            charge_amount=max(0.01, float(round(charge, 2))),
             service_date_from=service_date,
             unit_type="UNIT",
             unit_count=float(units),
@@ -935,7 +862,7 @@ class ClaimGenerator:
             ),
             drug_quantity=drug_quantity,
             drug_unit_type=drug_data.ndc_unit,
-            diag_pointers=diag_pointers,
+            diag_pointers=[],
         )
 
     @staticmethod
@@ -956,44 +883,54 @@ class ClaimGenerator:
                     line.drug_quantity * random.uniform(0.3, 0.8), 3
                 )
 
-    def _generate_diagnoses(self, diag_pointers: list[int]) -> list[Code]:
-        """Generate diagnosis list based on pointers used."""
-        diags: list[Code] = []
-
-        # Ensure we have enough diagnoses
-        num_diags_needed = max(diag_pointers) if diag_pointers else 1
-
-        # Select random ICD-10 codes
-        selected_codes = random.sample(
-            BASIC_ICD10_CODES, min(num_diags_needed, len(BASIC_ICD10_CODES))
-        )
-
-        for i, icd_data in enumerate(selected_codes):
-            subtype = "ICD_10_PRINCIPAL" if i == 0 else "ICD_10"
-            diags.append(
-                Code(sub_type=subtype, code=icd_data.code, desc=icd_data.description)
+    def _generate_diagnoses(
+        self,
+        service_lines: list[ProfLine],
+        ctx: PatientContext,
+        service_date: date,
+    ) -> list[Code]:
+        """Generate claim diagnoses and line pointers from empirical counts."""
+        target = sample_count("diagnoses_per_claim", minimum=1)
+        age_band = age_band_for(ctx.patient_dob, service_date)
+        selected: list[str] = []
+        attempts = 0
+        while len(selected) < target and attempts < target * 10:
+            line_procedure = service_lines[attempts % len(service_lines)].procedure
+            procedure = line_procedure.code if line_procedure else ""
+            diagnosis = sample_correlated(
+                "diagnosis",
+                (
+                    ("procedure_diagnosis", procedure),
+                    ("age_band_diagnosis", age_band),
+                ),
             )
+            if diagnosis not in selected:
+                selected.append(diagnosis)
+            attempts += 1
 
-        return diags
+        for line in service_lines:
+            count = min(sample_count("diagnoses_per_line"), len(selected))
+            line.diag_pointers = list(range(1, count + 1))
+
+        return [
+            Code(
+                sub_type="ICD_10_PRINCIPAL" if i == 0 else "ICD_10",
+                code=code,
+                desc=code_description("diagnosis", code),
+            )
+            for i, code in enumerate(selected)
+        ]
 
     def _build_forced_diagnoses(self, icd10_codes: list[str]) -> list[Code]:
         """Build diagnosis list from specific ICD-10 codes."""
-        by_code = {c.formatted_code: c for c in BASIC_ICD10_CODES}
-        diags: list[Code] = []
-        for i, code in enumerate(icd10_codes):
-            icd_data = by_code.get(code)
-            subtype = "ICD_10_PRINCIPAL" if i == 0 else "ICD_10"
-            if icd_data:
-                diags.append(
-                    Code(
-                        sub_type=subtype,
-                        code=icd_data.code,
-                        desc=icd_data.description,
-                    )
-                )
-            else:
-                diags.append(Code(sub_type=subtype, code=code, desc=code))
-        return diags
+        return [
+            Code(
+                sub_type="ICD_10_PRINCIPAL" if i == 0 else "ICD_10",
+                code=code.replace(".", ""),
+                desc=code_description("diagnosis", code.replace(".", "")),
+            )
+            for i, code in enumerate(icd10_codes)
+        ]
 
     @staticmethod
     def _sample(pool: list[T], most: int) -> list[T]:
@@ -1027,7 +964,10 @@ class ClaimGenerator:
     @staticmethod
     def _generate_drg(enc: _Encounter) -> Code | None:
         """UB-04 FL 71."""
-        if enc.facility != ACUTE_INPATIENT_FACILITY:
+        if not enc.is_inpatient or enc.facility not in {
+            ACUTE_INPATIENT_FACILITY,
+            *EITHER_FACILITY_TYPES,
+        }:
             return None
         code, desc = random.choice(MS_DRG_CODES)
         return Code(sub_type="DRG", code=code, desc=desc)
@@ -1183,8 +1123,8 @@ class ClaimGenerator:
         if random.random() < 0.5:
             code, desc = principal.code, principal.desc
         else:
-            icd_data = random.choice(BASIC_ICD10_CODES)
-            code, desc = icd_data.code, icd_data.description
+            code = sample_distribution("diagnosis")
+            desc = code_description("diagnosis", code)
         return [InstDiagnosis(sub_type="ICD_10_ADMITTING", code=code, desc=desc)]
 
     @staticmethod
@@ -1196,13 +1136,18 @@ class ClaimGenerator:
         instead. No POA indicator."""
         if is_inpatient or random.random() >= 0.5:
             return []
+        codes: list[str] = []
+        for _ in range(min(3, sample_count("diagnoses_per_claim", minimum=1))):
+            code = sample_distribution("diagnosis")
+            if code not in codes:
+                codes.append(code)
         return [
             InstDiagnosis(
                 sub_type="ICD_10_REASON_FOR_VISIT",
-                code=icd_data.code,
-                desc=icd_data.description,
+                code=code,
+                desc=code_description("diagnosis", code),
             )
-            for icd_data in random.sample(BASIC_ICD10_CODES, random.randint(1, 3))
+            for code in codes
         ]
 
     @classmethod
@@ -1229,9 +1174,8 @@ class ClaimGenerator:
             for code, desc in cls._sample(pool, 2)
         ]
 
-    @classmethod
     def _generate_operating_provider(
-        cls, *, has_procs: bool, facility: str
+        self, *, has_procs: bool, facility: str
     ) -> Provider | None:
         """UB-04 FL 77. Required once a surgical procedure is listed, and also
         reported by outpatient surgical claims whose FL 74 stays empty. A home
@@ -1240,7 +1184,7 @@ class ClaimGenerator:
         if random.random() >= chance:
             return None
         code, desc = random.choice(SURGICAL_TAXONOMIES)
-        return cls._generate_rendering_provider().model_copy(
+        return self._generate_rendering_provider(code).model_copy(
             update={
                 "entity_role": "OPERATING",
                 "provider_taxonomy": Code(
@@ -1282,20 +1226,37 @@ class ClaimGenerator:
                 )
         return values or None
 
-    def _generate_inst_diagnoses(self, include_poa: bool) -> list[InstDiagnosis]:
-        num_diags = random.randint(1, 4)
-        selected_codes = random.sample(
-            BASIC_ICD10_CODES,
-            min(num_diags, len(BASIC_ICD10_CODES)),
-        )
+    def _generate_inst_diagnoses(
+        self,
+        service_lines: list[InstLine],
+        ctx: PatientContext,
+        service_date: date,
+        include_poa: bool,
+    ) -> list[InstDiagnosis]:
+        num_diags = sample_count("diagnoses_per_claim", minimum=1)
+        age_band = age_band_for(ctx.patient_dob, service_date)
+        selected_codes: list[str] = []
+        attempts = 0
+        while len(selected_codes) < num_diags and attempts < num_diags * 10:
+            procedure = service_lines[attempts % len(service_lines)].procedure
+            code = sample_correlated(
+                "diagnosis",
+                (
+                    ("procedure_diagnosis", procedure.code if procedure else ""),
+                    ("age_band_diagnosis", age_band),
+                ),
+            )
+            if code not in selected_codes:
+                selected_codes.append(code)
+            attempts += 1
         return [
             InstDiagnosis(
                 sub_type="ICD_10_PRINCIPAL" if i == 0 else "ICD_10",
-                code=icd_data.code,
-                desc=icd_data.description,
+                code=code,
+                desc=code_description("diagnosis", code),
                 present_on_admission_indicator=self._poa_indicator(i, include_poa),
             )
-            for i, icd_data in enumerate(selected_codes)
+            for i, code in enumerate(selected_codes)
         ]
 
     def _build_forced_inst_diagnoses(
@@ -1303,19 +1264,15 @@ class ClaimGenerator:
         icd10_codes: list[str],
         include_poa: bool,
     ) -> list[InstDiagnosis]:
-        by_code = {c.formatted_code: c for c in BASIC_ICD10_CODES}
-        diags: list[InstDiagnosis] = []
-        for i, code in enumerate(icd10_codes):
-            icd_data = by_code.get(code)
-            diags.append(
-                InstDiagnosis(
-                    sub_type="ICD_10_PRINCIPAL" if i == 0 else "ICD_10",
-                    code=icd_data.code if icd_data else code,
-                    desc=icd_data.description if icd_data else code,
-                    present_on_admission_indicator=self._poa_indicator(i, include_poa),
-                )
+        return [
+            InstDiagnosis(
+                sub_type="ICD_10_PRINCIPAL" if i == 0 else "ICD_10",
+                code=code.replace(".", ""),
+                desc=code_description("diagnosis", code.replace(".", "")),
+                present_on_admission_indicator=self._poa_indicator(i, include_poa),
             )
-        return diags
+            for i, code in enumerate(icd10_codes)
+        ]
 
     @staticmethod
     def _poa_indicator(index: int, include_poa: bool) -> str | None:
@@ -1413,8 +1370,36 @@ class ClaimGenerator:
             address=generate_address(),
         )
 
+    def _pick_or_generate_rendering_provider(self) -> Provider:
+        new_provider_rate = ratio("unique_providers_per_claim") / ratio(
+            "unique_patients_per_claim"
+        )
+        if self._rendering_providers and random.random() >= new_provider_rate:
+            return random.choice(self._rendering_providers)
+        provider = self._generate_rendering_provider()
+        self._rendering_providers.append(provider)
+        return provider
+
+    def _providers_for_claim(self, ctx: PatientContext) -> list[Provider]:
+        target = max(1, sample_count("providers_per_claim") - 1)
+        providers = [ctx.rendering_provider]
+        while len(providers) < target:
+            used = {item.identifier for item in providers}
+            available = [
+                provider
+                for provider in self._rendering_providers
+                if provider.identifier not in used
+            ]
+            if available:
+                providers.append(random.choice(available))
+                continue
+            provider = self._generate_rendering_provider()
+            self._rendering_providers.append(provider)
+            providers.append(provider)
+        return providers
+
     @staticmethod
-    def _generate_rendering_provider() -> Provider:
+    def _generate_rendering_provider(taxonomy_code: str | None = None) -> Provider:
         """Generate rendering provider information.
 
         All attributes are derived deterministically from the NPI so that the
@@ -1427,7 +1412,8 @@ class ClaimGenerator:
         first = rng.choice(FIRST_NAMES["UNKNOWN"])
         last = rng.choice(LAST_NAMES)
         middle = rng.choice(string.ascii_uppercase)
-        tax_code, tax_desc = rng.choice(RENDERING_PROVIDER_TAXONOMIES)
+        tax_code = taxonomy_code or sample_distribution("provider_taxonomy")
+        tax_desc = code_description("provider_taxonomy", tax_code)
 
         city_state = rng.choice(CITIES_STATES)
         street_number = rng.randint(100, 9999)
@@ -1487,7 +1473,7 @@ class ClaimGenerator:
         """
         if forced_cpt_codes:
             return bool(set(forced_cpt_codes) & _INPATIENT_CPT_CODES)
-        return random.random() < 0.35
+        return sample_distribution("inpatient_classification") == "inpatient"
 
     @staticmethod
     def _admission_discharge_hours(*, same_day: bool) -> tuple[int, int]:
@@ -1504,25 +1490,22 @@ class ClaimGenerator:
 
     @staticmethod
     def _institutional_claim_codes(is_inpatient: bool) -> tuple[Code, str]:
-        facility_options = [
-            f
-            for f in UB04_FACILITY_TYPES
-            if (f[0] in INPATIENT_FACILITY_TYPES) is is_inpatient
-        ]
-        facility_code, facility_desc = random.choice(facility_options)
-        statuses = (
-            UB04_INPATIENT_DISCHARGE_STATUS
-            if is_inpatient
-            else UB04_OUTPATIENT_DISCHARGE_STATUS
+        facility_code = sample_conditional(
+            "claim_type_facility_code",
+            "INST",
+            fallback="facility_code",
+            allowed=(
+                INPATIENT_FACILITY_TYPES | EITHER_FACILITY_TYPES
+                if is_inpatient
+                else OUTPATIENT_FACILITY_TYPES | EITHER_FACILITY_TYPES
+            ),
         )
-        patient_status = random.choices(
-            list(statuses), weights=list(statuses.values()), k=1
-        )[0]
+        patient_status = sample_distribution("patient_discharge_status")
         return (
             Code(
                 sub_type="UB_FACILITY_TYPE",
                 code=facility_code,
-                desc=facility_desc,
+                desc=code_description("facility_code", facility_code),
             ),
             patient_status,
         )

@@ -216,7 +216,7 @@ class TestDailyFeedGenerator:
         monkeypatch.setattr(
             feed._payment_gen,
             "_select_payment_scenario",
-            lambda: {"type": "full_payment"},
+            lambda _procedure: {"type": "full_payment"},
         )
         further_refiles, payer_payments = feed._process_responses(date(2025, 6, 4))
         assert further_refiles == []
@@ -273,7 +273,7 @@ class TestDailyFeedGenerator:
         monkeypatch.setattr(
             feed._payment_gen,
             "_select_payment_scenario",
-            lambda: {"type": "partial_payment"},
+            lambda _procedure: {"type": "partial_payment"},
         )
         original = feed._payment_gen.generate_payment_for_claim(claims[0])
 
@@ -346,7 +346,7 @@ class TestDailyFeedGenerator:
         assert first_ids == second_ids
         assert len(first_ids) == len(set(first_ids))
 
-    def test_partial_payment_clears_insurance_outstanding(self, monkeypatch):
+    def test_payment_reduces_insurance_outstanding(self, monkeypatch):
         state = init_state(seed=42)
         feed = DailyFeedGenerator(state)
         claims, _ = feed.process_day(date(2025, 6, 2))
@@ -354,7 +354,7 @@ class TestDailyFeedGenerator:
         monkeypatch.setattr(
             feed._payment_gen,
             "_select_payment_scenario",
-            lambda: {"type": "partial_payment"},
+            lambda _procedure: {"type": "partial_payment"},
         )
 
         payment = feed._payment_gen.generate_payment_for_claim(claim)
@@ -366,8 +366,19 @@ class TestDailyFeedGenerator:
             item for item in state.ar_items if item.pcn == claim.patient_control_number
         ]
         assert claim_ar
-        assert all(item.insurance_outstanding == 0 for item in claim_ar)
-        assert all(item.closed_date is None for item in claim_ar)
+        payment_lines = {
+            line.source_line_id: line for line in payment.service_lines or []
+        }
+        for item in claim_ar:
+            line = payment_lines[item.source_line_id]
+            resolved = line.paid_amount + sum(
+                adjustment.amount
+                for adjustment in line.adjustments or []
+                if adjustment.group in {"CONTRACTUAL", "PATIENT_RESPONSIBILITY"}
+            )
+            assert item.insurance_outstanding == pytest.approx(
+                max(0, item.charge_amount - resolved)
+            )
 
     def test_closed_ar_is_retained_through_reversal_window(self):
         state = init_state(seed=42)
@@ -462,7 +473,7 @@ class TestDailyFeedCLI:
         monkeypatch.setattr("synthetic_edi_gen.daily_feed._REJECTED_REFILE_RATE", 1.0)
         monkeypatch.setattr(
             "synthetic_edi_gen.payment_generator.PaymentGenerator._select_payment_scenario",
-            lambda _self: {"type": "full_payment"},
+            lambda _self, _procedure: {"type": "full_payment"},
         )
 
         daily_feed(

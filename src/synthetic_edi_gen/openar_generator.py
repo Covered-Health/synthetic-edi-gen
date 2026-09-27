@@ -14,9 +14,17 @@ from typing import Any
 
 import pandas as pd
 
-from .basic_codes import BASIC_CPT_CODES, DENIAL_CARC_CODES
+from .basic_codes import DENIAL_CARC_CODES
 from .helpers import generate_person_name, generate_service_date
-from .reference_data import PLACE_OF_SERVICE, PlaceOfService
+from .reference_data import place_of_service, sample_payer
+from .stats import (
+    catalog,
+    sample_correlated,
+    sample_count,
+    sample_distribution,
+    sample_numeric,
+    sample_presence,
+)
 
 # Financial class mappings from payer info
 FINANCIAL_CLASS_MAP = {
@@ -26,12 +34,6 @@ FINANCIAL_CLASS_MAP = {
     "CI": "Commercial",
     "HM": "Managed Care",
 }
-
-# Claim form types
-CLAIM_FORM_TYPES = ["CMS Claim", "UB Claim"]
-
-# Claim statuses
-CLAIM_STATUSES = ["Accepted", "Rejected", "Notification", "Unmapped Code"]
 
 # Age bucket definitions (in days)
 AGE_BUCKETS = [
@@ -68,6 +70,16 @@ class OpenARGenerator:
         if seed is not None:
             random.seed(seed)
         self._transaction_id_counter = 230000000
+
+    @staticmethod
+    def _openar_status(payment_status: str) -> str:
+        if payment_status == "DENIED":
+            return "Rejected"
+        if payment_status == "NOT_OUR_CLAIM":
+            return "Unmapped Code"
+        if payment_status.endswith("FORWARDED"):
+            return "Notification"
+        return "Accepted"
 
     def generate_ar_rows_for_claim(
         self,
@@ -242,21 +254,12 @@ class OpenARGenerator:
             pcn = "U" + "".join(random.choices(string.digits, k=11))
 
             # Random financial class
-            financial_class = random.choice(list(FINANCIAL_CLASS_MAP.values()))
-
-            # Generate payer info
-            payer_name = random.choice(
-                [
-                    "MEDICARE",
-                    "MEDICAID",
-                    "BCBS",
-                    "AETNA",
-                    "CIGNA",
-                    "UNITED HEALTHCARE",
-                    "HUMANA",
-                ]
+            payer = sample_payer()
+            financial_class = FINANCIAL_CLASS_MAP.get(
+                payer.claim_filing_code, "Commercial"
             )
-            plan_name = f"{payer_name} PPO" if random.random() > 0.3 else payer_name
+            payer_name = payer.name
+            plan_name = f"{payer_name} {payer.plan_type.replace('_', ' ')}"
 
             # Generate provider names
             first, last, _ = generate_person_name("UNKNOWN")
@@ -269,24 +272,47 @@ class OpenARGenerator:
             mrn = self._generate_mrn()
             hospital_account_id = self._generate_hospital_account_id()
 
-            # Random procedure
-            cpt_data = random.choice(BASIC_CPT_CODES)
-            charge_amount = round(
-                random.uniform(cpt_data.min_cost, cpt_data.max_cost), 2
+            claim_type = sample_distribution("claim_type")
+            procedure_code = sample_correlated(
+                "procedure", (("claim_type_procedure", claim_type),)
+            )
+            charge_amount = sample_numeric(
+                "line_charge_bucket",
+                conditions=(("procedure_charge_bucket", procedure_code),),
             )
 
             # Outstanding amount (full charge for unmatched)
             outstanding_amount = charge_amount
 
             # Random place of service
-            pos: PlaceOfService = random.choice(PLACE_OF_SERVICE)
+            pos = place_of_service()
             department = random.choice(DEPARTMENTS)
-            place_of_service = f"{department} - POS {pos.code}"
+            place_of_service_text = f"{department} - POS {pos.code}"
 
             # Build modifiers string
+            modifier_count = (
+                sample_count("modifier_count_per_line")
+                if sample_presence("line_has_modifier")
+                else 0
+            )
             modifiers = None
-            if random.random() < 0.2:
-                modifiers = random.choice(["25", "59", "76", "LT", "RT", "26"])
+            if modifier_count:
+                selected: list[str] = []
+                while len(selected) < modifier_count:
+                    available = set(catalog("modifier")) - set(selected)
+                    if not available:
+                        break
+                    selected.append(
+                        sample_correlated(
+                            "modifier",
+                            (
+                                ("procedure_modifier", procedure_code),
+                                ("claim_type_modifier", claim_type),
+                            ),
+                            allowed=available,
+                        )
+                    )
+                modifiers = ",".join(selected)
 
             row = {
                 "Slices by Service Date Age (days)": age_bucket,
@@ -299,14 +325,16 @@ class OpenARGenerator:
                 "Billing Provider": billing_provider_name,
                 "Referring Provider": referring_provider_name,
                 "Service Date": service_date,
-                "Procedure Code": cpt_data.code,
+                "Procedure Code": procedure_code,
                 "Modifiers (All)": modifiers,
                 "Transaction Type": "Charge",
                 "Posted Amount ($)": float(round(charge_amount, 2)),
-                "Claim Status": random.choice(CLAIM_STATUSES),
+                "Claim Status": self._openar_status(
+                    sample_distribution("payment_status")
+                ),
                 "Crossover Status": None,
-                "Claim Form Type": random.choice(CLAIM_FORM_TYPES),
-                "Place of Service": place_of_service,
+                "Claim Form Type": "UB Claim" if claim_type == "INST" else "CMS Claim",
+                "Place of Service": place_of_service_text,
                 "Department": department,
                 "Hospital Account ID": hospital_account_id,
                 "Invoice Number": pcn,
@@ -356,7 +384,7 @@ class OpenARGenerator:
             outstanding_amount = charge_amount
         elif payment_line:
             paid_amount = float(payment_line.get("paidAmount", 0))
-            adjustments = payment_line.get("adjustments", [])
+            adjustments = payment_line.get("adjustments") or []
 
             # Calculate contractual adjustment (CARC 45 - charge vs allowed)
             contractual_adj = 0.0
@@ -416,7 +444,7 @@ class OpenARGenerator:
         """True if 835 line has zero paid and denial CARC (e.g. 16, 29, 50, 96, 97)."""
         if float(payment_line.get("paidAmount", 0)) != 0:
             return False
-        for adj in payment_line.get("adjustments", []):
+        for adj in payment_line.get("adjustments") or []:
             reason = adj.get("reason") or {}
             code = reason.get("code") if isinstance(reason, dict) else None
             if code and code in DENIAL_CARC_CODES:

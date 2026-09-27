@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from .stats import catalog, distribution
+
 
 class BasicCPTCode(BaseModel):
     code: str
@@ -872,37 +874,38 @@ FEMALE_ONLY_PCS_CODES = {"0UT90ZZ"}
 # UB-04 form locator 4 bill type, position 2. The facility type is what decides
 # whether a claim bills a stay, so generator and validator both read it here
 # rather than each keeping their own list.
+INPATIENT_FACILITY_TYPES = {"11", "12", "18", "65", "66", "84", "86"}
+EITHER_FACILITY_TYPES = {"85"}
+OUTPATIENT_FACILITY_TYPES = {
+    "13",
+    "14",
+    "71",
+    "72",
+    "73",
+    "74",
+    "75",
+    "76",
+    "77",
+    "78",
+    "79",
+    "83",
+}
 UB04_FACILITY_TYPES = [
-    ("11", "Hospital inpatient"),
-    ("21", "Skilled nursing inpatient"),
-    ("13", "Hospital outpatient"),
-    ("32", "Home health"),
+    (code, catalog("facility_code").get(code, code))
+    for code in sorted(
+        INPATIENT_FACILITY_TYPES | OUTPATIENT_FACILITY_TYPES | EITHER_FACILITY_TYPES
+    )
 ]
-
-INPATIENT_FACILITY_TYPES = {"11", "21"}
 SNF_FACILITY = "21"
 
-# UB-04 form locator 17 patient discharge status, with the relative frequency to
-# generate each at. Values are weights, not percentages; the code each one names
-# is spelled out because the 837I carries the bare code with no description.
+# These aliases remain for the constraint validator and public compatibility.
+# Generation samples the aggregate distribution directly.
+_PATIENT_STATUS_COUNTS = distribution("patient_discharge_status")
 UB04_INPATIENT_DISCHARGE_STATUS = {
-    "01": 55,  # Discharged to home or self-care
-    "02": 6,  # Transferred to a short-term general hospital
-    "03": 10,  # Transferred to a skilled nursing facility
-    "06": 8,  # Discharged to organized home health care
-    "20": 4,  # Expired
-    "30": 4,  # Still a patient
-    "62": 4,  # Transferred to an inpatient rehabilitation facility
-    "63": 3,  # Transferred to a long term care hospital
-    "65": 3,  # Transferred to a psychiatric hospital or unit
-    "90": 3,  # Transferred to an IRF with a planned acute care readmission
+    code: _PATIENT_STATUS_COUNTS.get(code, 0)
+    for code in {"01", "02", "03", "06", "20", "30", "62", "63", "65", "90"}
 }
-
 UB04_OUTPATIENT_DISCHARGE_STATUS = {
-    "01": 80,  # Discharged to home or self-care
-    "02": 4,  # Transferred to a short-term general hospital
-    "06": 4,  # Discharged to organized home health care
-    "09": 8,  # Admitted as an inpatient to this hospital
-    "20": 1,  # Expired
-    "30": 3,  # Still a patient
+    code: _PATIENT_STATUS_COUNTS.get(code, 0)
+    for code in {"01", "02", "06", "09", "20", "30"}
 }
