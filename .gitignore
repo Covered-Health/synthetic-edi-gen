@@ -10,4 +10,3 @@ build/
 .python-version
 .idea/
 output/
-src/synthetic_edi_gen/data/stats.json
