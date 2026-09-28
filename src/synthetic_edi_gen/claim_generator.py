@@ -8,6 +8,7 @@ import string
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
+from math import sqrt
 from typing import Literal, TypeVar, cast
 
 from synthetic_edi_gen.edi_models import (
@@ -103,6 +104,12 @@ T = TypeVar("T")
 # Procedures that put a patient in a bed. A forced CPT outside this set bills an
 # outpatient encounter, however the claim type would otherwise have been drawn.
 _INPATIENT_CPT_CODES = {"27447", "47562", "29881", "49505"}
+
+
+def provider_roster_size(claim_count: int) -> int:
+    """Scale 50 providers at 1k claims sub-linearly, capped at 3k."""
+    return min(3000, max(1, round(50 * sqrt(max(1, claim_count) / 1000))))
+
 
 # How often a claim reports occurrence spans at all. Outpatient bills are gated
 # lower because 73 is the only span reportable on one: at the inpatient rate,
@@ -225,10 +232,75 @@ class ClaimGenerator:
         if seed is not None:
             random.seed(seed)
         self.generated_pcns: set[str] = set()
+        self._seed = seed
         self._drug_defect_rate = drug_defect_rate
         self._rendering_providers: list[Provider] = []
+        self._rendering_provider_weights: list[float] = []
+        self._operating_providers: list[Provider] = []
+        self._operating_provider_weights: list[float] = []
+        self._provider_roster_fixed = False
         self._billing_provider: Provider | None = None
         self._institutional_billing_provider: Provider | None = None
+
+    def prepare_provider_roster(
+        self, claim_count: int, provider_count: int | None = None
+    ) -> None:
+        """Build deterministic, nested provider rosters for a normal-mode run."""
+        count = (
+            provider_roster_size(claim_count)
+            if provider_count is None
+            else provider_count
+        )
+        if count < 1:
+            raise ValueError("provider_count must be at least 1")
+
+        rendering_rng = self._provider_rng("rendering")
+        rendering: list[Provider] = []
+        used_npis: set[str | None] = set()
+        while len(rendering) < count:
+            provider = self._generate_rendering_provider(rng=rendering_rng)
+            if provider.identifier not in used_npis:
+                rendering.append(provider)
+                used_npis.add(provider.identifier)
+        self.set_provider_roster(rendering)
+
+        operating_rng = self._provider_rng("operating")
+        operating_count = min(50, max(1, round(count / 20)))
+        self._operating_providers = []
+        while len(self._operating_providers) < operating_count:
+            provider = self._new_operating_provider(operating_rng)
+            if provider.identifier not in used_npis:
+                self._operating_providers.append(provider)
+                used_npis.add(provider.identifier)
+        self._operating_provider_weights = self._rank_weights(operating_count)
+
+        self._billing_provider = self._generate_billing_provider(
+            self._provider_rng("billing")
+        )
+        self._institutional_billing_provider = (
+            self._generate_institutional_billing_provider(
+                self._provider_rng("institutional-billing")
+            )
+        )
+
+    def set_provider_roster(self, providers: list[Provider]) -> None:
+        """Use an existing fixed roster, including the persisted daily roster."""
+        if not providers:
+            raise ValueError("provider roster must not be empty")
+        self._rendering_providers = list(providers)
+        self._rendering_provider_weights = self._rank_weights(len(providers))
+        self._provider_roster_fixed = True
+
+    def _provider_rng(self, role: str) -> random.Random:
+        return (
+            random.Random(f"{self._seed}:{role}")
+            if self._seed is not None
+            else random.Random()
+        )
+
+    @staticmethod
+    def _rank_weights(count: int) -> list[float]:
+        return [1 / rank for rank in range(1, count + 1)]
 
     def generate_patient_context(
         self,
@@ -1183,8 +1255,18 @@ class ClaimGenerator:
         chance = 0.85 if has_procs else (0.15 if facility == "13" else 0.0)
         if random.random() >= chance:
             return None
-        code, desc = random.choice(SURGICAL_TAXONOMIES)
-        return self._generate_rendering_provider(code).model_copy(
+        if self._operating_providers:
+            return random.choices(
+                self._operating_providers,
+                weights=self._operating_provider_weights,
+                k=1,
+            )[0]
+        return self._new_operating_provider(random.Random(random.getrandbits(128)))
+
+    @classmethod
+    def _new_operating_provider(cls, rng: random.Random) -> Provider:
+        code, desc = rng.choice(SURGICAL_TAXONOMIES)
+        return cls._generate_rendering_provider(code, rng=rng).model_copy(
             update={
                 "entity_role": "OPERATING",
                 "provider_taxonomy": Code(
@@ -1327,7 +1409,7 @@ class ClaimGenerator:
             ),
         )
 
-    def _generate_billing_provider(self) -> Provider:
+    def _generate_billing_provider(self, rng: random.Random | None = None) -> Provider:
         """Generate billing provider information."""
         org_names = [
             "MEDICAL ASSOCIATES",
@@ -1337,20 +1419,23 @@ class ClaimGenerator:
             "COMMUNITY HEALTH",
         ]
 
-        suffix = random.choice(["LLC", "PC", "PA", "INC"])
-        name = f"{random.choice(org_names)} {suffix}"
+        choice = rng.choice if rng else random.choice
+        suffix = choice(["LLC", "PC", "PA", "INC"])
+        name = f"{choice(org_names)} {suffix}"
 
         return Provider(
             entity_role="BILLING_PROVIDER",
             entity_type="BUSINESS",
             identification_type="NPI",
-            identifier=generate_npi(),
-            tax_id=generate_tax_id(),
+            identifier=generate_npi(rng),
+            tax_id=generate_tax_id(rng),
             last_name_or_org_name=name,
-            address=generate_address(),
+            address=generate_address(rng),
         )
 
-    def _generate_institutional_billing_provider(self) -> Provider:
+    def _generate_institutional_billing_provider(
+        self, rng: random.Random | None = None
+    ) -> Provider:
         org_names = [
             "GENERAL HOSPITAL",
             "REGIONAL MEDICAL CENTER",
@@ -1358,19 +1443,26 @@ class ClaimGenerator:
             "MEMORIAL HOSPITAL",
             "UNIVERSITY MEDICAL CENTER",
         ]
-        name = random.choice(org_names)
+        choice = rng.choice if rng else random.choice
+        name = choice(org_names)
 
         return Provider(
             entity_role="BILLING_PROVIDER",
             entity_type="BUSINESS",
             identification_type="NPI",
-            identifier=generate_npi(),
-            tax_id=generate_tax_id(),
+            identifier=generate_npi(rng),
+            tax_id=generate_tax_id(rng),
             last_name_or_org_name=name,
-            address=generate_address(),
+            address=generate_address(rng),
         )
 
     def _pick_or_generate_rendering_provider(self) -> Provider:
+        if self._provider_roster_fixed:
+            return random.choices(
+                self._rendering_providers,
+                weights=self._rendering_provider_weights,
+                k=1,
+            )[0]
         new_provider_rate = ratio("unique_providers_per_claim") / ratio(
             "unique_patients_per_claim"
         )
@@ -1391,28 +1483,52 @@ class ClaimGenerator:
                 if provider.identifier not in used
             ]
             if available:
-                providers.append(random.choice(available))
+                if self._provider_roster_fixed:
+                    weighted = [
+                        (provider, weight)
+                        for provider, weight in zip(
+                            self._rendering_providers,
+                            self._rendering_provider_weights,
+                            strict=True,
+                        )
+                        if provider.identifier not in used
+                    ]
+                    providers.append(
+                        random.choices(
+                            [provider for provider, _ in weighted],
+                            weights=[weight for _, weight in weighted],
+                            k=1,
+                        )[0]
+                    )
+                else:
+                    providers.append(random.choice(available))
                 continue
+            if self._provider_roster_fixed:
+                break
             provider = self._generate_rendering_provider()
             self._rendering_providers.append(provider)
             providers.append(provider)
         return providers
 
     @staticmethod
-    def _generate_rendering_provider(taxonomy_code: str | None = None) -> Provider:
+    def _generate_rendering_provider(
+        taxonomy_code: str | None = None,
+        *,
+        rng: random.Random | None = None,
+    ) -> Provider:
         """Generate rendering provider information.
 
         All attributes are derived deterministically from the NPI so that the
         same NPI always produces the same name, address, and taxonomy — across
         calls and across process runs — without any external cache.
         """
-        npi = generate_npi()
+        npi = generate_npi(rng)
         rng = random.Random(npi)
 
         first = rng.choice(FIRST_NAMES["UNKNOWN"])
         last = rng.choice(LAST_NAMES)
         middle = rng.choice(string.ascii_uppercase)
-        tax_code = taxonomy_code or sample_distribution("provider_taxonomy")
+        tax_code = taxonomy_code or sample_distribution("provider_taxonomy", rng=rng)
         tax_desc = code_description("provider_taxonomy", tax_code)
 
         city_state = rng.choice(CITIES_STATES)

@@ -188,6 +188,7 @@ def generate(
     institutional_claim_rate: Annotated[
         float | None, Parameter(validator=Number(gte=0.0, lte=1.0))
     ] = None,
+    provider_count: Annotated[int | None, Parameter(validator=Number(gte=1))] = None,
     seed: int | None = None,
     batch_size: int = 10000,
     claims_per_file: int = 10000,
@@ -212,6 +213,7 @@ def generate(
         secondary_payer_payment_rate: Percentage of matched claims with a secondary
             payer 835
         institutional_claim_rate: Percentage of 837 claims emitted as 837I
+        provider_count: Rendering-provider roster size; scales with count by default
         seed: Random seed for reproducibility
         batch_size: Batch size for progress reporting and disk flushing
         claims_per_file: Max 837 claims per file (0 = single file)
@@ -242,6 +244,7 @@ def generate(
     # carry defects (missing NDC, quantity mismatch) so downstream NDC edits
     # in the batch analyzer can be exercised end-to-end.
     claim_gen = ClaimGenerator(seed=seed, drug_defect_rate=0.10)
+    claim_gen.prepare_provider_roster(count, provider_count)
     payment_gen = PaymentGenerator(seed=seed)
     openar_gen = OpenARGenerator(seed=seed)
 

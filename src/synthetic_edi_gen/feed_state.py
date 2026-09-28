@@ -120,6 +120,7 @@ class ARServiceLineRecord(BaseModel):
     financial_class: str
     billing_provider_name: str
     referring_provider_name: str
+    referring_provider_npi: str | None = None
     department: str
     place_of_service: str
     claim_form_type: str

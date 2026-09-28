@@ -153,6 +153,30 @@ class TestGenerate:
         lines = _read_all_jsonl(output_dir, "837_claims")
         assert len(lines) == count
 
+    def test_provider_set_is_independent_of_batch_size(self, tmp_path):
+        provider_sets = []
+        for batch_size in (7, 13):
+            output_dir = tmp_path / str(batch_size)
+            generate(
+                count=100,
+                output_dir=output_dir,
+                seed=42,
+                provider_count=10,
+                batch_size=batch_size,
+                match_rate=0,
+                unmatched_ar_rate=0,
+            )
+            claims = map(json.loads, _read_all_jsonl(output_dir, "837_claims"))
+            provider_sets.append(
+                {
+                    provider["identifier"]
+                    for claim in claims
+                    for provider in claim.get("providers", [])
+                }
+            )
+
+        assert provider_sets[0] == provider_sets[1]
+
     def test_match_rate_controls_payment_count(self, tmp_path):
         count = 20
         output_dir = tmp_path / "output"

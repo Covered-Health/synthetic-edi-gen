@@ -201,11 +201,13 @@ class TestGenerateArRowsForClaim:
                     "firstName": "JANE",
                     "lastNameOrOrgName": "SMITH",
                     "entityRole": "RENDERING",
+                    "identifier": "1234567893",
                 }
             ]
         )
         rows = gen.generate_ar_rows_for_claim(claim)
         assert rows[0]["Referring Provider"] == "SMITH, JANE"
+        assert rows[0]["Referring Provider NPI"] == "1234567893"
 
     def test_modifiers_in_row(self, gen):
         claim = make_claim_dict(

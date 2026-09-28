@@ -18,6 +18,7 @@ from synthetic_edi_gen.basic_codes import (
 )
 from synthetic_edi_gen.claim_generator import (
     ClaimGenerator,
+    provider_roster_size,
     rebase_patient_context,
 )
 from synthetic_edi_gen.stats import catalog
@@ -36,6 +37,19 @@ class TestClaimGeneratorReproducibility:
         claim_b = ClaimGenerator(seed=2).generate_claim()
 
         assert claim_a.patient_control_number != claim_b.patient_control_number
+
+    def test_provider_rosters_are_capped_and_nested_by_seed(self):
+        small = ClaimGenerator(seed=123)
+        small.prepare_provider_roster(1_000)
+        large = ClaimGenerator(seed=123)
+        large.prepare_provider_roster(10_000_000)
+
+        assert provider_roster_size(1_000) == 50
+        assert provider_roster_size(10_000_000) == 3_000
+        assert [p.identifier for p in small._rendering_providers] == [
+            p.identifier for p in large._rendering_providers[:50]
+        ]
+        assert small._billing_provider == large._billing_provider
 
 
 class TestGeneratePatientContext:

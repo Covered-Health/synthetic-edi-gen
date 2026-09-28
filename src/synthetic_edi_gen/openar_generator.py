@@ -129,8 +129,10 @@ class OpenARGenerator:
         billing_provider_name = billing_provider.get("lastNameOrOrgName", "UNKNOWN")
         providers = claim.get("providers", [])
         referring_provider_name = ""
+        referring_provider_npi = ""
         if providers:
             provider = providers[0]
+            referring_provider_npi = provider.get("identifier", "")
             if provider.get("firstName"):
                 last = provider.get(
                     "lastName",
@@ -212,6 +214,7 @@ class OpenARGenerator:
                 payer_info=payer_info,
                 billing_provider_name=billing_provider_name,
                 referring_provider_name=referring_provider_name,
+                referring_provider_npi=referring_provider_npi,
                 financial_class=financial_class,
                 age_bucket=age_bucket,
                 mrn=mrn,
@@ -352,6 +355,7 @@ class OpenARGenerator:
         payer_info: dict[str, Any],
         billing_provider_name: str,
         referring_provider_name: str,
+        referring_provider_npi: str,
         financial_class: str,
         age_bucket: str,
         mrn: str,
@@ -425,6 +429,7 @@ class OpenARGenerator:
             "Current Payer": payer_name,
             "Billing Provider": billing_provider_name,
             "Referring Provider": referring_provider_name,
+            "Referring Provider NPI": referring_provider_npi,
             "Service Date": service_date,
             "Procedure Code": procedure_code,
             "Modifiers (All)": modifiers,
@@ -489,6 +494,7 @@ OPENAR_COLUMNS = [
     "Current Payer",
     "Billing Provider",
     "Referring Provider",
+    "Referring Provider NPI",
     "Service Date",
     "Procedure Code",
     "Modifiers (All)",

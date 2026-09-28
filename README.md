@@ -25,6 +25,7 @@ uv run synthetic-edi-gen --count 1000 --seed 42 --output-dir ./output
 | `--revised-claim-rate` | Fraction of denied/fixable claims emitted again as replacement claims (0.0-1.0) | `0.01` |
 | `--secondary-payer-payment-rate` | Fraction of matched claims with an additional secondary payer 835 (0.0-1.0) | `0.10` |
 | `--institutional-claim-rate` | Fraction of 837 claims emitted as 837I institutional records (0.0-1.0) | `0.30` |
+| `--provider-count` | Rendering-provider roster size; otherwise scales from 50 at 1k claims to a 3k cap | automatic |
 | `--seed` | Random seed for reproducibility | `None` |
 | `--batch-size` | Batch size for progress reporting | `10000` |
 

@@ -328,8 +328,10 @@ class TestDailyFeedGenerator:
 
         snapshot = feed.generate_ar_snapshot(date(2025, 6, 2))
         assert len(snapshot) > 0
+        roster_npis = {provider.npi for provider in state.providers}
         for row in snapshot:
             assert "Invoice Number" in row
+            assert row["Referring Provider NPI"] in roster_npis
             assert "Insurance Outstanding Amount ($)" in row
             assert row["Insurance Outstanding Amount ($)"] > 0
 

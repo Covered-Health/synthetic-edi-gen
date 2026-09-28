@@ -43,6 +43,11 @@ class TestPaymentMatchesClaim:
         claim, payment = sample_claim_payment_pair
         assert len(payment.service_lines) == len(claim.service_lines)
 
+    def test_service_provider_matches_claim(self, sample_claim_payment_pair):
+        claim, payment = sample_claim_payment_pair
+        assert payment.service_provider is not None
+        assert payment.service_provider.identifier == claim.providers[0].identifier
+
 
 class TestPaymentStructure:
     def test_payment_has_required_fields(self, sample_claim_payment_pair):

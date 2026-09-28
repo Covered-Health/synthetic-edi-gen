@@ -40,6 +40,15 @@ class TestGenerateNpi:
         assert len(npi) == 10
         assert npi.isdigit()
 
+    def test_has_valid_luhn_check_digit(self):
+        for _ in range(100):
+            digits = [int(digit) for digit in f"80840{generate_npi()}"]
+            total = 0
+            for index, digit in enumerate(reversed(digits)):
+                value = digit * (2 if index % 2 else 1)
+                total += value - 9 if value > 9 else value
+            assert total % 10 == 0
+
 
 class TestGenerateTaxId:
     def test_returns_9_digits(self):

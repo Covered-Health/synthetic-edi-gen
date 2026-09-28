@@ -18,14 +18,19 @@ def generate_patient_control_number() -> str:
     return "".join(random.choices(string.digits, k=10))
 
 
-def generate_npi() -> str:
-    """Generate a fake NPI (National Provider Identifier)."""
-    return "".join(random.choices(string.digits, k=10))
+def generate_npi(rng: random.Random | None = None) -> str:
+    """Generate a synthetic NPI with a valid check digit."""
+    digits = "".join((rng.choices if rng else random.choices)(string.digits, k=9))
+    total = 0
+    for index, digit in enumerate(reversed(f"80840{digits}")):
+        value = int(digit) * (2 if index % 2 == 0 else 1)
+        total += value - 9 if value > 9 else value
+    return f"{digits}{-total % 10}"
 
 
-def generate_tax_id() -> str:
+def generate_tax_id(rng: random.Random | None = None) -> str:
     """Generate a fake tax ID."""
-    return "".join(random.choices(string.digits, k=9))
+    return "".join((rng.choices if rng else random.choices)(string.digits, k=9))
 
 
 def generate_member_id() -> str:
@@ -64,10 +69,13 @@ def generate_birth_date(
     return min(birthday, today)
 
 
-def generate_address() -> Address:
+def generate_address(rng: random.Random | None = None) -> Address:
     """Generate a fake address."""
-    city_state = random.choice(CITIES_STATES)
-    street_number = random.randint(100, 9999)
+    choice = rng.choice if rng else random.choice
+    randint = rng.randint if rng else random.randint
+    random_value = rng.random if rng else random.random
+    city_state = choice(CITIES_STATES)
+    street_number = randint(100, 9999)
     street_names = [
         "MAIN ST",
         "OAK AVE",
@@ -80,20 +88,20 @@ def generate_address() -> Address:
         "CHURCH ST",
         "SCHOOL ST",
     ]
-    street = f"{street_number} {random.choice(street_names)}"
+    street = f"{street_number} {choice(street_names)}"
 
     # Sometimes add apartment/suite
     line2 = None
-    if random.random() < 0.3:
-        if random.random() < 0.5:
-            line2 = f"APT {random.randint(1, 999)}"
+    if random_value() < 0.3:
+        if random_value() < 0.5:
+            line2 = f"APT {randint(1, 999)}"
         else:
-            line2 = f"SUITE {random.randint(100, 999)}"
+            line2 = f"SUITE {randint(100, 999)}"
 
     # Add 4-digit extension to zip sometimes
     zip_code = city_state.zip
-    if random.random() < 0.7:
-        zip_code += str(random.randint(1000, 9999))
+    if random_value() < 0.7:
+        zip_code += str(randint(1000, 9999))
 
     return Address(
         line=street,

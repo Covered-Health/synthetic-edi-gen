@@ -44,7 +44,7 @@ from .feed_state import (
     save_state,
 )
 from .generate import write_jsonl
-from .helpers import generate_birth_date, generate_transaction_id
+from .helpers import generate_birth_date, generate_npi, generate_transaction_id
 from .openar_generator import (
     AGE_BUCKETS,
     DEPARTMENTS,
@@ -144,7 +144,7 @@ def _generate_provider_record(
     middle = rng.choice(string.ascii_uppercase)
     streets = ["MAIN ST", "OAK AVE", "MEDICAL PKWY", "HOSPITAL DR", "PARK BLVD"]
     return ProviderRecord(
-        npi="".join(rng.choices(string.digits, k=10)),
+        npi=generate_npi(rng),
         first_name=first,
         last_name=last,
         middle_initial=middle,
@@ -165,7 +165,7 @@ def init_state(seed: int, start_date: date | None = None) -> FeedState:
     org_city = rng.choice(CITIES_STATES)
     org = OrganizationProfile(
         name="ADVANCED ORTHOPEDIC & SURGICAL ASSOCIATES PA",
-        npi="".join(rng.choices(string.digits, k=10)),
+        npi=generate_npi(rng),
         tax_id="".join(rng.choices(string.digits, k=9)),
         city=org_city.city,
         state_code=org_city.state,
@@ -293,6 +293,7 @@ class DailyFeedGenerator:
                     "Current Payer": item.payer_name,
                     "Billing Provider": item.billing_provider_name,
                     "Referring Provider": item.referring_provider_name,
+                    "Referring Provider NPI": item.referring_provider_npi,
                     "Service Date": item.service_date,
                     "Procedure Code": item.procedure_code,
                     "Modifiers (All)": item.modifiers,
@@ -341,11 +342,14 @@ class DailyFeedGenerator:
         provider_rec = self._pick_active_provider()
         patient = self._pick_or_create_patient(day_date, provider_rec)
         ctx = self._build_patient_context(patient, provider_rec, day_date)
-        self._claim_gen._rendering_providers = [
-            self._provider_party(provider)
+        active = [
+            provider
             for provider in self.state.providers
             if provider.departure_date is None
-        ]
+        ] or self.state.providers[-5:]
+        self._claim_gen.set_provider_roster(
+            [self._provider_party(provider) for provider in active]
+        )
 
         claim = self._claim_gen.generate_claim(ctx=ctx)
         # Override non-deterministic fields (uuid4 uses OS entropy, not random)
@@ -475,7 +479,11 @@ class DailyFeedGenerator:
         active = [p for p in self.state.providers if p.departure_date is None]
         if not active:
             active = self.state.providers[-5:]
-        return random.choice(active)
+        return random.choices(
+            active,
+            weights=[1 / rank for rank in range(1, len(active) + 1)],
+            k=1,
+        )[0]
 
     def _build_patient_context(
         self,
@@ -616,6 +624,7 @@ class DailyFeedGenerator:
                     referring_provider_name=(
                         f"{provider.last_name}, {provider.first_name}"
                     ),
+                    referring_provider_npi=provider.npi,
                     department=department,
                     place_of_service=pos_desc,
                     claim_form_type="CMS Claim",
@@ -816,6 +825,7 @@ class DailyFeedGenerator:
             patient=original.patient,
             payer=original.payer,
             payee=original.payee,
+            service_provider=original.service_provider,
             service_lines=reversed_lines,
             transaction=Transaction835(
                 control_number=generate_transaction_id()[:10],
