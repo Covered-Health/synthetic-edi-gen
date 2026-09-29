@@ -37,7 +37,7 @@ jobs:
       - name: Download aggregate stats
         run: |
           mkdir -p src/synthetic_edi_gen/data
-          aws s3 cp --no-progress s3://covered-data-files/synthetic-edi-gen/stats.json src/synthetic_edi_gen/data/stats.json
+          aws s3 cp --no-progress s3://protego-synthetic-data/stats.json src/synthetic_edi_gen/data/stats.json
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --frozen
 
