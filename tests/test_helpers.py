@@ -39,6 +39,7 @@ class TestGenerateNpi:
         npi = generate_npi()
         assert len(npi) == 10
         assert npi.isdigit()
+        assert npi[0] in "12"
 
     def test_has_valid_luhn_check_digit(self):
         for _ in range(100):
