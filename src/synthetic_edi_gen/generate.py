@@ -4,7 +4,7 @@
 import random
 from copy import deepcopy
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, TextIO
 
@@ -18,13 +18,21 @@ from .claim_generator import (
     ClaimGenerator,
     PatientContext,
 )
+from .episodes import (
+    EpisodePlan,
+    episode_days,
+    episode_family,
+    generate_episode_claim,
+    patient_episode_count,
+    plan_episode,
+)
 from .openar_generator import (
     OpenARGenerator,
     write_openar_csv,
     write_openar_xlsx,
 )
 from .payment_generator import PaymentGenerator
-from .stats import sample_count, sample_distribution
+from .stats import sample_count
 
 
 def _plan_har_groups(total_claims: int) -> list[int]:
@@ -249,9 +257,13 @@ def generate(
     openar_gen = OpenARGenerator(seed=seed)
 
     # Plan HAR groups
-    har_groups = _plan_har_groups(count)
+    family = episode_family()
+    har_groups = _plan_har_groups(count) if family is None else []
     multi_pcn_hars = sum(1 for g in har_groups if g > 1)
-    print(f"  HAR groups: {len(har_groups):,} ({multi_pcn_hars:,} with multiple PCNs)")
+    if family is None:
+        print(
+            f"  HAR groups: {len(har_groups):,} ({multi_pcn_hars:,} with multiple PCNs)"
+        )
 
     ar_rows: list[dict] = []
     claim_type_counts = {"PROF": 0, "INST": 0}
@@ -270,44 +282,40 @@ def generate(
 
     def _emit_har_group(
         ctx: PatientContext,
-        group_size: int,
-        forced_cpt_codes: list[str] | None = None,
-        forced_icd10_codes: list[str] | None = None,
-    ) -> None:
+        plan: EpisodePlan,
+    ) -> date:
         """Generate and write all claims for one HAR group."""
         nonlocal primary_payments_written, clearinghouse_rejections_written
         nonlocal revised_claims_written
         nonlocal secondary_payments_written
         har_id = openar_gen._generate_hospital_account_id()
+        episode_end = ctx.base_service_date + timedelta(
+            days=episode_days(plan.family, "span") if plan.family else 0
+        )
 
-        for _claim_idx in range(group_size):
-            # PB: same date; HB (group_size > 3): spread across 1-14 days
-            if group_size <= 3:
-                svc_date = ctx.base_service_date
+        for claim_index in range(len(plan.claim_types)):
+            if plan.family is not None:
+                svc_date = ctx.base_service_date + timedelta(
+                    days=episode_days(
+                        plan.family,
+                        "claim_service_offset",
+                        plan.claim_types[claim_index],
+                    )
+                )
             else:
                 svc_date = ctx.base_service_date + timedelta(
-                    days=random.randint(0, min(14, group_size))
+                    days=random.randint(0, min(14, len(plan.claim_types)))
+                    if len(plan.claim_types) > 3
+                    else 0
                 )
-
-            is_institutional = (
-                sample_distribution("claim_type") == "INST"
-                if institutional_claim_rate is None
-                else random.random() < institutional_claim_rate
+            claim = generate_episode_claim(claim_gen, ctx, plan, claim_index, svc_date)
+            episode_end = max(
+                episode_end,
+                claim.service_date_to or claim.service_date_from or svc_date,
             )
-            if is_institutional:
-                claim = claim_gen.generate_institutional_claim(
-                    ctx=ctx,
-                    service_date=svc_date,
-                    forced_cpt_codes=forced_cpt_codes,
-                    forced_icd10_codes=forced_icd10_codes,
-                )
-            else:
-                claim = claim_gen.generate_claim(
-                    ctx=ctx,
-                    service_date=svc_date,
-                    forced_cpt_codes=forced_cpt_codes,
-                    forced_icd10_codes=forced_icd10_codes,
-                )
+            claim.transaction.creation_date = max(
+                claim.transaction.creation_date or episode_end, episode_end
+            )
             claim_type = claim.transaction.transaction_type or "PROF"
             claim_type_counts[claim_type] = claim_type_counts.get(claim_type, 0) + 1
             claims_writer.write(claim)
@@ -379,15 +387,42 @@ def generate(
                 )
                 claims_writer.flush()
                 payments_writer.flush()
+        return episode_end
 
     try:
-        group_idx = 0
-        while group_idx < len(har_groups):
-            group_size = har_groups[group_idx]
-            mrn = openar_gen._generate_mrn()
-            ctx = replace(claim_gen.generate_patient_context(), mrn=mrn)
-            _emit_har_group(ctx, group_size)
-            group_idx += 1
+        if family is None:
+            for group_size in har_groups:
+                mrn = openar_gen._generate_mrn()
+                ctx = replace(claim_gen.generate_patient_context(), mrn=mrn)
+                plan = plan_episode(
+                    ctx,
+                    legacy_count=group_size,
+                    institutional_rate=institutional_claim_rate,
+                )
+                _emit_har_group(ctx, plan)
+        else:
+            remaining = count
+            while remaining:
+                ctx = replace(
+                    claim_gen.generate_patient_context(), mrn=openar_gen._generate_mrn()
+                )
+                for _ in range(patient_episode_count(family)):
+                    plan = plan_episode(
+                        ctx,
+                        claim_limit=remaining,
+                        institutional_rate=institutional_claim_rate,
+                    )
+                    har_groups.append(len(plan.claim_types))
+                    episode_end = _emit_har_group(ctx, plan)
+                    remaining -= len(plan.claim_types)
+                    if not remaining:
+                        break
+                    ctx = replace(
+                        ctx,
+                        base_service_date=episode_end
+                        + timedelta(days=episode_days(family, "return_gap", minimum=1)),
+                    )
+            multi_pcn_hars = sum(size > 1 for size in har_groups)
     finally:
         claims_writer.close()
         payments_writer.close()

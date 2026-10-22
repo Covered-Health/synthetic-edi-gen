@@ -373,15 +373,20 @@ def sample_count(
     distribution_name: str,
     *,
     correlation: tuple[str, str | Sequence[str]] | None = None,
+    conditions: Sequence[tuple[str, str | Sequence[str]]] = (),
     minimum: int = 0,
     rng: _Random = random,
 ) -> int:
     value = (
-        sample_conditional(
-            correlation[0], correlation[1], fallback=distribution_name, rng=rng
+        sample_correlated(distribution_name, conditions, rng=rng)
+        if conditions
+        else (
+            sample_conditional(
+                correlation[0], correlation[1], fallback=distribution_name, rng=rng
+            )
+            if correlation
+            else sample_distribution(distribution_name, rng=rng)
         )
-        if correlation
-        else sample_distribution(distribution_name, rng=rng)
     )
     if "-" in value:
         low, high = (int(part) for part in value.split("-", 1))

@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import random
 import string
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -28,9 +29,17 @@ from .edi_models import (
     Code,
     Payment,
     PaymentLine,
-    ProfClaim,
     Provider,
     Transaction835,
+)
+from .episodes import (
+    Claim,
+    episode_days,
+    episode_family,
+    generate_episode_claim,
+    parse_claim,
+    patient_episode_count,
+    plan_episode,
 )
 from .feed_state import (
     ARServiceLineRecord,
@@ -39,7 +48,9 @@ from .feed_state import (
     PatientRecord,
     PendingClaimRecord,
     ProviderRecord,
+    ReturnEpisodeRecord,
     RevertCandidateRecord,
+    ScheduledClaimRecord,
     load_state,
     save_state,
 )
@@ -220,15 +231,24 @@ class DailyFeedGenerator:
         self._claims_per_day_max = claims_per_day_max
         self._claim_gen = ClaimGenerator(seed=None)
         self._payment_gen = PaymentGenerator(seed=None)
+        if state.institutional_billing_provider is None:
+            state.institutional_billing_provider = (
+                self._claim_gen._generate_institutional_billing_provider(
+                    random.Random(f"{state.seed}:institutional-billing")
+                )
+            )
+        self._claim_gen.generated_pcns.update(item.pcn for item in state.ar_items)
+        for item in [*state.pending_claims, *state.scheduled_claims]:
+            self._claim_gen.generated_pcns.add(item.claim_data["patientControlNumber"])
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def process_day(self, day_date: date) -> tuple[list[ProfClaim], list[Payment]]:
+    def process_day(self, day_date: date) -> tuple[list[Claim], list[Payment]]:
         """Process a single simulated day.  Returns (new_claims, new_payments)."""
 
-        new_claims: list[ProfClaim] = []
+        new_claims: list[Claim] = []
         new_payments: list[Payment] = []
 
         # Phase 0 — day parameters (isolated seed)
@@ -246,8 +266,34 @@ class DailyFeedGenerator:
         # Phase 2 — new 837 claims
         random.seed(_day_seed(self.state.seed, day_date, phase=2))
         for _ in range(num_claims):
-            claim = self._generate_new_claim(day_date)
-            new_claims.append(claim)
+            due = next(
+                (
+                    item
+                    for item in self.state.scheduled_claims
+                    if item.scheduled_date <= day_date
+                ),
+                None,
+            )
+            while due is None:
+                self._schedule_episode(day_date)
+                due = next(
+                    (
+                        item
+                        for item in self.state.scheduled_claims
+                        if item.scheduled_date <= day_date
+                    ),
+                    None,
+                )
+            self.state.scheduled_claims.remove(due)
+            new_claims.append(
+                self._submit_claim(
+                    parse_claim(due.claim_data),
+                    due.har_id,
+                    due.patient,
+                    due.provider,
+                    day_date,
+                )
+            )
 
         # Phase 3 — 835 responses for pending claims
         random.seed(_day_seed(self.state.seed, day_date, phase=3))
@@ -338,33 +384,127 @@ class DailyFeedGenerator:
     # Phase 2 — new claim generation
     # ------------------------------------------------------------------
 
-    def _generate_new_claim(self, day_date: date) -> ProfClaim:
-        provider_rec = self._pick_active_provider()
-        patient = self._pick_or_create_patient(day_date, provider_rec)
-        ctx = self._build_patient_context(patient, provider_rec, day_date)
-        active = [
-            provider
-            for provider in self.state.providers
-            if provider.departure_date is None
-        ] or self.state.providers[-5:]
-        self._claim_gen.set_provider_roster(
-            [self._provider_party(provider) for provider in active]
+    def _schedule_episode(self, day_date: date) -> None:
+        provider = self._pick_active_provider()
+        family = episode_family()
+        returning = next(
+            (
+                item
+                for item in self.state.return_episodes
+                if item.scheduled_date <= day_date and item.family == family
+            ),
+            None,
         )
+        if returning is not None:
+            self.state.return_episodes.remove(returning)
+            patient = returning.patient
+            remaining = returning.remaining - 1
+        elif family is not None:
+            age_band = sample_conditional(
+                "provider_taxonomy_age_band",
+                provider.taxonomy_code,
+                fallback="age_band",
+            )
+            patient = self._create_patient(day_date, age_band)
+            self.state.patients.append(patient)
+            self.state.patients = self.state.patients[-_MAX_PATIENT_POOL:]
+            remaining = patient_episode_count(family) - 1
+        else:
+            patient = self._pick_or_create_patient(day_date, provider)
+            remaining = 0
+        ctx = self._build_patient_context(patient, provider, day_date)
+        active = [
+            p for p in self.state.providers if p.departure_date is None
+        ] or self.state.providers[-5:]
+        self._claim_gen.set_provider_roster([self._provider_party(p) for p in active])
+        if returning is not None:
+            ctx = replace(ctx, base_service_date=returning.scheduled_date)
+        plan = plan_episode(ctx)
+        service_offsets = [
+            episode_days(family, "claim_service_offset", kind) if family else 0
+            for kind in plan.claim_types
+        ]
+        submission_offsets = [
+            episode_days(family, "claim_submission_offset", kind) if family else 0
+            for kind in plan.claim_types
+        ]
+        # Bootstrap the first submission today; later PCNs retain observed offsets.
+        anchor = max(
+            patient.dob,
+            ctx.base_service_date
+            - timedelta(days=max(service_offsets[0], submission_offsets[0])),
+        )
+        if returning is not None:
+            anchor = ctx.base_service_date
+        ctx = replace(ctx, base_service_date=anchor)
+        har_id = "".join(random.choices(string.digits, k=11))
+        episode_end = anchor + timedelta(
+            days=episode_days(family, "span") if family else 0
+        )
+        for index, _kind in enumerate(plan.claim_types):
+            service_date = anchor + timedelta(days=service_offsets[index])
+            if index == 0 and returning is None:
+                service_date = min(service_date, day_date)
+            claim = generate_episode_claim(
+                self._claim_gen,
+                ctx,
+                plan,
+                index,
+                service_date,
+                submission_date=day_date if index == 0 and returning is None else None,
+            )
+            claim.id = "".join(random.choices("0123456789abcdef", k=24))
+            service_end = (
+                claim.service_date_to or claim.service_date_from or service_date
+            )
+            episode_end = max(episode_end, service_end)
+            scheduled = max(
+                service_end, anchor + timedelta(days=submission_offsets[index])
+            )
+            if index == 0 and returning is None:
+                scheduled = min(scheduled, day_date)
+            claim.transaction.creation_date = scheduled
+            claim.transaction.creation_time = time(8, 0)
+            self.state.scheduled_claims.append(
+                ScheduledClaimRecord(
+                    scheduled_date=scheduled,
+                    har_id=har_id,
+                    patient=patient,
+                    provider=provider.model_copy(deep=True),
+                    claim_data=claim.model_dump(
+                        by_alias=True, mode="json", exclude_none=True
+                    ),
+                )
+            )
+        self.state.scheduled_claims.sort(key=lambda item: item.scheduled_date)
+        if family is not None and remaining:
+            self.state.return_episodes.append(
+                ReturnEpisodeRecord(
+                    patient=patient,
+                    family=cast(Literal["encounter", "billing_episode"], family),
+                    remaining=remaining,
+                    scheduled_date=max(day_date, episode_end)
+                    + timedelta(days=episode_days(family, "return_gap", minimum=1)),
+                )
+            )
+            self.state.return_episodes.sort(key=lambda item: item.scheduled_date)
 
-        claim = self._claim_gen.generate_claim(ctx=ctx)
-        # Override non-deterministic fields (uuid4 uses OS entropy, not random)
-        claim.id = "".join(random.choices("0123456789abcdef", k=24))
+    def _submit_claim(
+        self,
+        claim: Claim,
+        har_id: str,
+        patient: PatientRecord,
+        provider: ProviderRecord,
+        day_date: date,
+    ) -> Claim:
         claim.transaction.creation_date = day_date
         claim.transaction.creation_time = time(8, 0)
-
         clearinghouse_rejection = random.random() < _CLEARINGHOUSE_REJECTION_RATE
         response_delay = (
             random.randint(1, 2)
             if clearinghouse_rejection
             else self._sample_response_delay()
         )
-        har_id = "".join(random.choices(string.digits, k=11))
-
         self.state.pending_claims.append(
             PendingClaimRecord(
                 submitted_date=day_date,
@@ -377,8 +517,7 @@ class DailyFeedGenerator:
                 clearinghouse_rejection=clearinghouse_rejection,
             )
         )
-
-        self._create_ar_items(claim, har_id, patient, provider_rec, day_date)
+        self._create_ar_items(claim, har_id, patient, provider, day_date)
         self.state.total_claims_submitted += 1
         return claim
 
@@ -528,6 +667,7 @@ class DailyFeedGenerator:
                     "plan_type": patient.payer_plan_type,
                 }
             ),
+            institutional_billing_provider=self.state.institutional_billing_provider,
             billing_provider=Provider(
                 entity_role="BILLING_PROVIDER",
                 entity_type="BUSINESS",
@@ -585,18 +725,19 @@ class DailyFeedGenerator:
 
     def _create_ar_items(
         self,
-        claim: ProfClaim,
+        claim: Claim,
         har_id: str,
         patient: PatientRecord,
         provider: ProviderRecord,
         day_date: date,
     ) -> None:
-        org = self.state.organization
         fin_class = FINANCIAL_CLASS_MAP.get(
             patient.payer_claim_filing_code, "Commercial"
         )
         department = random.choice(DEPARTMENTS)
-        pos_desc = f"{department} - POS {patient.pos_code}"
+        is_inst = claim.transaction.transaction_type == "INST"
+        prefix = "UB" if is_inst else "POS"
+        pos_desc = f"{department} - {prefix} {claim.facility_code.code}"
 
         for svc in claim.service_lines or []:
             proc_code = svc.procedure.code if svc.procedure else ""
@@ -620,14 +761,18 @@ class DailyFeedGenerator:
                     payer_name=patient.payer_name,
                     plan_name=patient.payer_name,
                     financial_class=fin_class,
-                    billing_provider_name=org.name,
+                    billing_provider_name=(
+                        claim.billing_provider.last_name_or_org_name or "UNKNOWN"
+                    )
+                    if claim.billing_provider
+                    else "UNKNOWN",
                     referring_provider_name=(
                         f"{provider.last_name}, {provider.first_name}"
                     ),
                     referring_provider_npi=provider.npi,
                     department=department,
                     place_of_service=pos_desc,
-                    claim_form_type="CMS Claim",
+                    claim_form_type="UB Claim" if is_inst else "CMS Claim",
                     insurance_outstanding=float(svc.charge_amount),
                     opened_date=day_date,
                 )
@@ -637,10 +782,8 @@ class DailyFeedGenerator:
     # Phase 3 — 835 responses
     # ------------------------------------------------------------------
 
-    def _process_responses(
-        self, day_date: date
-    ) -> tuple[list[ProfClaim], list[Payment]]:
-        refiled_claims: list[ProfClaim] = []
+    def _process_responses(self, day_date: date) -> tuple[list[Claim], list[Payment]]:
+        refiled_claims: list[Claim] = []
         payments: list[Payment] = []
         still_pending: list[PendingClaimRecord] = []
 
@@ -649,7 +792,7 @@ class DailyFeedGenerator:
                 still_pending.append(pending)
                 continue
 
-            claim = ProfClaim.model_validate(pending.claim_data)
+            claim = parse_claim(pending.claim_data)
 
             if pending.clearinghouse_rejection:
                 payments.append(self._build_clearinghouse_rejection(claim, day_date))
@@ -700,9 +843,7 @@ class DailyFeedGenerator:
         self.state.pending_claims = still_pending
         return refiled_claims, payments
 
-    def _build_clearinghouse_rejection(
-        self, claim: ProfClaim, day_date: date
-    ) -> Payment:
+    def _build_clearinghouse_rejection(self, claim: Claim, day_date: date) -> Payment:
         """Build a zero-payment record that downstream classifies as REJECTED."""
         payment = self._payment_gen.generate_rejection_for_claim(claim)
         payment.id = "".join(random.choices("0123456789abcdef", k=24))
@@ -710,7 +851,7 @@ class DailyFeedGenerator:
         payment.transaction.production_date = day_date
         return payment
 
-    def _refile_rejected_claim(self, claim: ProfClaim, day_date: date) -> ProfClaim:
+    def _refile_rejected_claim(self, claim: Claim, day_date: date) -> Claim:
         """Refile a clearinghouse-rejected claim as an original submission."""
         refiled = self._claim_gen.generate_refiled_claim(claim)
         refiled.id = "".join(random.choices("0123456789abcdef", k=24))
@@ -770,7 +911,7 @@ class DailyFeedGenerator:
 
             if random.random() < _REVERT_DAILY_PROBABILITY:
                 original_pmt = Payment.model_validate(cand.payment_data)
-                claim = ProfClaim.model_validate(cand.claim_data)
+                claim = parse_claim(cand.claim_data)
 
                 # 1. Reversal 835 (negative amounts)
                 reversal = self._build_reversal(original_pmt, day_date)
@@ -974,7 +1115,7 @@ def daily_feed(
         claims_per_day_min=claims_per_day_min,
         claims_per_day_max=claims_per_day_max,
     )
-    all_claims: list[ProfClaim] = []
+    all_claims: list[Claim] = []
     all_payments: list[Payment] = []
 
     if days_count > 1:

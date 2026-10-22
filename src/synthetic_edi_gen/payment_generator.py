@@ -67,11 +67,10 @@ class PaymentGenerator:
         total_charge = float(claim.charge_amount)
         service_lines = claim.service_lines or []
 
-        # Generate payment date (5-45 days after service)
-        claim_date = (
-            claim.service_date_from
-            or getattr(claim, "statement_date_from", None)
-            or date.today()
+        # Adjudication follows both the billed service period and submission.
+        claim_date = max(
+            claim.service_date_to or claim.service_date_from or date.today(),
+            claim.transaction.creation_date or date.today(),
         )
         payment_date = claim_date + timedelta(days=random.randint(5, 45))
 

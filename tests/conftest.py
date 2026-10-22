@@ -194,3 +194,83 @@ def seeded_random():
     random.seed(SEED)
     yield
     random.setstate(state)
+
+
+@pytest.fixture(autouse=True)
+def synthetic_stats(monkeypatch):
+    """Keep unit tests independent of changes to the measured export."""
+    from pathlib import Path
+
+    from synthetic_edi_gen import episodes, stats
+
+    clearers = [
+        value.cache_clear
+        for value in vars(stats).values()
+        if hasattr(value, "cache_clear")
+    ]
+    for clear in clearers:
+        clear()
+    fixture = stats.Stats.model_validate_json(
+        (Path(__file__).parent / "fixtures/stats-v2.json").read_bytes()
+    )
+    monkeypatch.setattr(stats, "load_stats", lambda: fixture)
+    monkeypatch.setattr(episodes, "load_stats", lambda: fixture)
+    yield fixture
+    for clear in clearers:
+        clear()
+
+
+@pytest.fixture()
+def episode_stats(synthetic_stats):
+    """Explicitly synthetic v3 data with a delayed mixed episode and return visit."""
+    from synthetic_edi_gen.stats import CorrelationCoverage, PopulationMetric
+
+    stats = synthetic_stats
+    stats.schema_version = 3
+    stats.distributions.update(
+        {
+            "encounters_per_patient": {"2": 10},
+            "claims_per_encounter": {"2": 10},
+            "encounter_setting": {"outpatient": 10},
+            "encounter_claim_type_mix": {"INST+PROF": 10},
+            "encounter_span_days": {"0": 10},
+            "encounter_return_gap_days": {"7": 10},
+            "encounter_claim_service_offset_days": {"0": 10},
+            "encounter_claim_submission_offset_days": {"0": 10, "3": 10},
+        }
+    )
+    rows = {
+        "encounter_setting_claims_per_encounter": {"outpatient|2": 10},
+        "encounter_procedure_claims_per_encounter": {},
+        "encounter_setting_claim_type_mix": {"outpatient|INST+PROF": 10},
+        "encounter_setting_claim_type": {"outpatient|INST": 10},
+        "encounter_provider_taxonomy_claim_type": {},
+        "encounter_claim_type_claim_service_offset_days": {"INST|0": 10, "PROF|0": 10},
+        "encounter_claim_type_claim_submission_offset_days": {
+            "INST|0": 10,
+            "PROF|3": 10,
+        },
+    }
+    stats.correlations.update(rows)
+    for name, pairs in rows.items():
+        totals = {}
+        for pair, count in pairs.items():
+            condition = pair.rsplit("|", 1)[0]
+            totals[condition] = totals.get(condition, 0) + count
+        stats.correlation_coverage[name] = CorrelationCoverage(
+            dimensions=["condition", "outcome"],
+            total_observations=sum(pairs.values()),
+            retained_observations=sum(pairs.values()),
+            conditioning_totals=totals,
+            omitted_by_condition={},
+        )
+    stats.population_metrics["encounters_per_patient"] = PopulationMetric(
+        sample_count=10,
+        mean=2,
+        stddev=0,
+        observation_window_days=365,
+        eligible_count=10,
+        excluded_count=0,
+    )
+    stats.semantics.grouping_semantics = {"encounter": "Synthetic test encounters only"}
+    return stats

@@ -98,7 +98,7 @@ from .stats import (
     sample_presence,
 )
 
-ClaimT = TypeVar("ClaimT", ProfClaim, InstClaim)
+ClaimT = TypeVar("ClaimT", bound=ProfClaim | InstClaim)
 T = TypeVar("T")
 
 # Procedures that put a patient in a bed. A forced CPT outside this set bills an
@@ -388,6 +388,8 @@ class ClaimGenerator:
         service_date: date | None = None,
         forced_cpt_codes: list[str] | None = None,
         forced_icd10_codes: list[str] | None = None,
+        primary_procedure_code: str | None = None,
+        place_of_service_code: str | None = None,
     ) -> ProfClaim:
         """Generate a single realistic 837P claim.
 
@@ -419,13 +421,19 @@ class ClaimGenerator:
         service_lines: list[ProfLine] = []
 
         for i in range(num_lines):
-            forced_code = forced_cpt_codes[i] if forced_cpt_codes else None
+            forced_code = (
+                forced_cpt_codes[i]
+                if forced_cpt_codes
+                else (primary_procedure_code if i == 0 else None)
+            )
             line = self._generate_service_line(
                 i + 1,
                 svc_date,
                 ctx,
                 forced_cpt=forced_code,
             )
+            if place_of_service_code is not None:
+                line.place_of_service_code = place_of_service_code
             service_lines.append(line)
         self._scale_claim_charges(service_lines, "PROF")
         total_charge = sum(line.charge_amount for line in service_lines)
@@ -475,6 +483,9 @@ class ClaimGenerator:
         service_date: date | None = None,
         forced_cpt_codes: list[str] | None = None,
         forced_icd10_codes: list[str] | None = None,
+        primary_procedure_code: str | None = None,
+        is_inpatient: bool | None = None,
+        submission_date: date | None = None,
     ) -> InstClaim:
         """Generate a single realistic 837I institutional claim."""
         if ctx is None:
@@ -482,7 +493,8 @@ class ClaimGenerator:
 
         pcn = self._generate_unique_pcn()
         svc_date = service_date or ctx.base_service_date
-        is_inpatient = self._is_inpatient_inst_claim(forced_cpt_codes)
+        if is_inpatient is None:
+            is_inpatient = self._is_inpatient_inst_claim(forced_cpt_codes)
         classification = "inpatient" if is_inpatient else "outpatient"
         stay_days = sample_count(
             "length_of_stay_days",
@@ -491,6 +503,12 @@ class ClaimGenerator:
                 classification,
             ),
         )
+        if submission_date is not None:
+            stay_days = min(stay_days, max(0, (submission_date - ctx.patient_dob).days))
+            svc_date = max(
+                ctx.patient_dob,
+                min(svc_date, submission_date - timedelta(days=stay_days)),
+            )
         statement_to = svc_date + timedelta(days=stay_days)
 
         service_lines = self._generate_institutional_service_lines(
@@ -499,6 +517,7 @@ class ClaimGenerator:
             ctx,
             is_inpatient,
             forced_cpt_codes=forced_cpt_codes,
+            primary_procedure_code=primary_procedure_code,
         )
         self._scale_claim_charges(service_lines, "INST")
         total_charge = sum(line.charge_amount for line in service_lines)
@@ -778,6 +797,7 @@ class ClaimGenerator:
         ctx: PatientContext,
         is_inpatient: bool,
         forced_cpt_codes: list[str] | None = None,
+        primary_procedure_code: str | None = None,
     ) -> list[InstLine]:
         if forced_cpt_codes:
             return [
@@ -796,12 +816,15 @@ class ClaimGenerator:
             correlation=("claim_type_service_lines_per_claim", "INST"),
             minimum=1,
         ) - len(lines)
-        for _ in range(num_ancillary):
+        if primary_procedure_code:
+            num_ancillary = max(1, num_ancillary)
+        for index in range(num_ancillary):
             lines.append(
                 self._generate_institutional_service_line(
                     len(lines) + 1,
                     service_date + timedelta(days=random.randint(0, stay_days - 1)),
                     ctx,
+                    primary_procedure_code if index == 0 else None,
                 )
             )
         return lines
