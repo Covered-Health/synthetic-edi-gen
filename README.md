@@ -92,6 +92,8 @@ account can cover more than one clinical visit. Generation prefers the encounter
 family, otherwise the billing-episode family, without mixing their conditionals.
 Missing conditional observations fall back to that family's marginal. V2 exports
 retain legacy patient/HAR grouping until v3 episode aggregates are installed.
+V3 data without usable encounter/account linkage produces one PCN per HAR;
+patient-level claim counts are not treated as observed account sizes.
 
 Logical claims count distinct normalized PCNs with an 837, excluding void-only
 PCNs and collapsing submissions for the same PCN. Explicitly linked revisions

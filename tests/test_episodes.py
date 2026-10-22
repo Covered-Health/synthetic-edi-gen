@@ -328,3 +328,14 @@ def test_offset_buckets_are_half_open_and_do_not_schedule_negative_days(
 
     episode_stats.distributions["encounter_claim_submission_offset_days"] = {bucket: 10}
     assert episode_days("encounter", "claim_submission_offset") == expected
+
+
+def test_v3_without_episode_linkage_does_not_infer_har_size_from_patient_claims(
+    synthetic_stats,
+):
+    from synthetic_edi_gen.generate import _plan_har_groups
+
+    synthetic_stats.schema_version = 3
+    synthetic_stats.distributions["claims_per_patient"] = {"50": 10}
+    assert episode_family() is None
+    assert _plan_har_groups(3) == [1, 1, 1]

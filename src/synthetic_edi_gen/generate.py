@@ -14,6 +14,7 @@ from cyclopts.validators import Number
 from synthetic_edi_gen._base import EDIBaseModel
 from synthetic_edi_gen.edi_models import Payment
 
+from . import stats
 from .claim_generator import (
     ClaimGenerator,
     PatientContext,
@@ -36,7 +37,9 @@ from .stats import sample_count
 
 
 def _plan_har_groups(total_claims: int) -> list[int]:
-    """Allocate claims to synthetic patients using the observed histogram."""
+    """Plan legacy HAR groups, keeping unlinked v3 claims separate."""
+    if stats.load_stats().schema_version == 3:
+        return [1] * total_claims
     groups: list[int] = []
     remaining = total_claims
     while remaining > 0:
