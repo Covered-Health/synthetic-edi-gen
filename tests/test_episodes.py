@@ -282,3 +282,49 @@ def test_payment_follows_institutional_service_end_and_submission(episode_stats)
     claim.transaction.creation_date = claim.service_date_to + timedelta(days=30)
     payment = PaymentGenerator(seed=42).generate_payment_for_claim(claim)
     assert payment.transaction.payment_date > claim.transaction.creation_date
+
+
+def test_packaged_statistics_generate_regular_and_daily_outputs(monkeypatch, tmp_path):
+    """Exercise the installed export as well as the controlled unit fixtures."""
+    import synthetic_edi_gen.episodes as episodes
+    import synthetic_edi_gen.stats as stats
+
+    measured = Stats.model_validate_json(
+        files("synthetic_edi_gen").joinpath("data/stats.json").read_bytes()
+    )
+    monkeypatch.setattr(stats, "load_stats", lambda: measured)
+    monkeypatch.setattr(episodes, "load_stats", lambda: measured)
+    state = init_state(42, START)
+    feed = DailyFeedGenerator(state, 10, 10)
+    for offset in range(7):
+        day = START + timedelta(days=offset)
+        claims, _ = feed.process_day(day)
+        for claim in claims:
+            assert (claim.service_date_to or claim.service_date_from) <= day
+            if isinstance(claim, InstClaim):
+                assert validate_institutional_claim(claim) == []
+    generate(count=20, seed=42, output_dir=tmp_path, revised_claim_rate=0)
+    emitted = [
+        parse_claim(json.loads(line))
+        for path in tmp_path.glob("837_claims*.jsonl")
+        for line in path.read_text().splitlines()
+    ]
+    assert len(emitted) == 20
+    for claim in emitted:
+        assert (
+            claim.service_date_to or claim.service_date_from
+        ) <= claim.transaction.creation_date
+        if isinstance(claim, InstClaim):
+            assert validate_institutional_claim(claim) == []
+
+
+@pytest.mark.parametrize(
+    "bucket,expected", [("0-1", 0), ("1-2", 1), ("negative:3-7", 0)]
+)
+def test_offset_buckets_are_half_open_and_do_not_schedule_negative_days(
+    episode_stats, bucket, expected
+):
+    from synthetic_edi_gen.episodes import episode_days
+
+    episode_stats.distributions["encounter_claim_submission_offset_days"] = {bucket: 10}
+    assert episode_days("encounter", "claim_submission_offset") == expected

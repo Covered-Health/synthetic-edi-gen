@@ -64,6 +64,7 @@ def episode_days(
         if claim_type and correlation in stats.correlations
         else None,
         minimum=minimum,
+        upper_exclusive=suffix in {"claim_service_offset", "claim_submission_offset"},
     )
 
 

@@ -375,6 +375,7 @@ def sample_count(
     correlation: tuple[str, str | Sequence[str]] | None = None,
     conditions: Sequence[tuple[str, str | Sequence[str]]] = (),
     minimum: int = 0,
+    upper_exclusive: bool = False,
     rng: _Random = random,
 ) -> int:
     value = (
@@ -388,11 +389,15 @@ def sample_count(
             else sample_distribution(distribution_name, rng=rng)
         )
     )
+    negative = value.startswith("negative:")
+    value = value.removeprefix("negative:")
     if "-" in value:
         low, high = (int(part) for part in value.split("-", 1))
-        count = rng.randint(low, high)
+        count = rng.randint(low, high - int(upper_exclusive))
     else:
         count = int(value.rstrip("+"))
+    if negative:
+        count = -count
     return max(minimum, count)
 
 
