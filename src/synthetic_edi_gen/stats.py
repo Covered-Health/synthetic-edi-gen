@@ -11,7 +11,7 @@ from functools import cache, lru_cache
 from importlib.resources import files
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class StatsBaseModel(BaseModel):
@@ -60,10 +60,22 @@ class StatsSemantics(StatsBaseModel):
     length_of_stay_days: str
     correlation_coverage: str
     facility_code: dict[str, str]
+    grouping_semantics: dict[str, str] = Field(default_factory=dict)
+
+
+class PopulationMetric(StatsBaseModel):
+    """Count summary over eligible populations; durations never expose dates."""
+
+    sample_count: int = Field(ge=0)
+    mean: float = Field(ge=0, allow_inf_nan=False)
+    stddev: float = Field(ge=0, allow_inf_nan=False)
+    observation_window_days: int | None = Field(default=None, ge=0)
+    eligible_count: int = Field(ge=0)
+    excluded_count: int = Field(ge=0)
 
 
 class Stats(StatsBaseModel):
-    schema_version: Literal[2]
+    schema_version: Literal[2, 3]
     generation: StatsGeneration
     counts: StatsCounts
     ratios: StatsRatios
@@ -72,6 +84,7 @@ class Stats(StatsBaseModel):
     correlation_coverage: dict[str, CorrelationCoverage]
     catalogs: dict[str, dict[str, str]]
     semantics: StatsSemantics
+    population_metrics: dict[str, PopulationMetric] = Field(default_factory=dict)
 
 
 class _Random(Protocol):
