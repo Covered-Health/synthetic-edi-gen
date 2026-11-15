@@ -29,14 +29,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Configure AWS credentials
+        id: aws
+        continue-on-error: true
         uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
         with:
           role-to-assume: ${{ vars.AWS_STATS_READ_ROLE_ARN }}
           aws-region: us-east-1
       - name: Download aggregate stats
+        if: steps.aws.outcome == 'success'
         run: |
-          mkdir -p src/synthetic_edi_gen/data
-          aws s3 cp --no-progress s3://protego-synthetic-data/stats.json src/synthetic_edi_gen/data/stats.json
+          stats_download="$(mktemp)"
+          trap 'rm -f "$stats_download"' EXIT
+          if aws s3 cp --no-progress s3://protego-synthetic-data/stats.json "$stats_download"; then
+            mv "$stats_download" src/synthetic_edi_gen/data/stats.json
+          else
+            echo "::warning::S3 stats unavailable; using packaged default stats."
+          fi
+      - name: Use default stats without AWS credentials
+        if: steps.aws.outcome != 'success'
+        run: echo "::warning::AWS credentials unavailable; using packaged default stats."
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --frozen
 
