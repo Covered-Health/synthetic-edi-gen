@@ -20,7 +20,10 @@ def generate_patient_control_number() -> str:
 
 def generate_npi(rng: random.Random | None = None) -> str:
     """Generate a synthetic NPI with a valid check digit."""
-    digits = "".join((rng.choices if rng else random.choices)(string.digits, k=9))
+    choice = rng.choice if rng else random.choice
+    digits = choice("12") + "".join(
+        (rng.choices if rng else random.choices)(string.digits, k=8)
+    )
     total = 0
     for index, digit in enumerate(reversed(f"80840{digits}")):
         value = int(digit) * (2 if index % 2 == 0 else 1)
