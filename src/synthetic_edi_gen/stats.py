@@ -11,7 +11,7 @@ from functools import cache, lru_cache
 from importlib.resources import files
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class StatsBaseModel(BaseModel):
@@ -60,10 +60,22 @@ class StatsSemantics(StatsBaseModel):
     length_of_stay_days: str
     correlation_coverage: str
     facility_code: dict[str, str]
+    grouping_semantics: dict[str, str] = Field(default_factory=dict)
+
+
+class PopulationMetric(StatsBaseModel):
+    """Count summary over eligible populations; durations never expose dates."""
+
+    sample_count: int = Field(ge=0)
+    mean: float = Field(ge=0, allow_inf_nan=False)
+    stddev: float = Field(ge=0, allow_inf_nan=False)
+    observation_window_days: int | None = Field(default=None, ge=0)
+    eligible_count: int = Field(ge=0)
+    excluded_count: int = Field(ge=0)
 
 
 class Stats(StatsBaseModel):
-    schema_version: Literal[2]
+    schema_version: Literal[2, 3]
     generation: StatsGeneration
     counts: StatsCounts
     ratios: StatsRatios
@@ -72,6 +84,7 @@ class Stats(StatsBaseModel):
     correlation_coverage: dict[str, CorrelationCoverage]
     catalogs: dict[str, dict[str, str]]
     semantics: StatsSemantics
+    population_metrics: dict[str, PopulationMetric] = Field(default_factory=dict)
 
 
 class _Random(Protocol):
@@ -360,21 +373,31 @@ def sample_count(
     distribution_name: str,
     *,
     correlation: tuple[str, str | Sequence[str]] | None = None,
+    conditions: Sequence[tuple[str, str | Sequence[str]]] = (),
     minimum: int = 0,
+    upper_exclusive: bool = False,
     rng: _Random = random,
 ) -> int:
     value = (
-        sample_conditional(
-            correlation[0], correlation[1], fallback=distribution_name, rng=rng
+        sample_correlated(distribution_name, conditions, rng=rng)
+        if conditions
+        else (
+            sample_conditional(
+                correlation[0], correlation[1], fallback=distribution_name, rng=rng
+            )
+            if correlation
+            else sample_distribution(distribution_name, rng=rng)
         )
-        if correlation
-        else sample_distribution(distribution_name, rng=rng)
     )
+    negative = value.startswith("negative:")
+    value = value.removeprefix("negative:")
     if "-" in value:
         low, high = (int(part) for part in value.split("-", 1))
-        count = rng.randint(low, high)
+        count = rng.randint(low, high - int(upper_exclusive))
     else:
         count = int(value.rstrip("+"))
+    if negative:
+        count = -count
     return max(minimum, count)
 
 

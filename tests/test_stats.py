@@ -9,21 +9,21 @@ import pytest
 import synthetic_edi_gen.claim_generator as claim_generator_module
 import synthetic_edi_gen.daily_feed as daily_feed_module
 import synthetic_edi_gen.payment_generator as payment_generator_module
+import synthetic_edi_gen.stats as stats_module
 from synthetic_edi_gen.claim_generator import ClaimGenerator
 from synthetic_edi_gen.daily_feed import DailyFeedGenerator, init_state
 from synthetic_edi_gen.payment_generator import PaymentGenerator
 from synthetic_edi_gen.stats import (
     _conditional_weights,
     catalog,
-    load_stats,
     sample_correlated,
 )
 
 
-def test_packaged_v2_file_loads_once():
-    stats = load_stats()
+def test_synthetic_v2_fixture_loads():
+    stats = stats_module.load_stats()
 
-    assert stats is load_stats()
+    assert stats is stats_module.load_stats()
     assert stats.schema_version == 2
     assert len(stats.distributions) == 44
     assert len(stats.correlations) == 33
@@ -32,7 +32,7 @@ def test_packaged_v2_file_loads_once():
 
 
 def test_capped_correlation_restores_omitted_mass():
-    stats = load_stats()
+    stats = stats_module.load_stats()
     correlation, fallback = next(
         (name, distribution)
         for name, coverage in stats.correlation_coverage.items()

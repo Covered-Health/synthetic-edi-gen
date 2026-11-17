@@ -307,8 +307,11 @@ class TestDailyFeedGenerator:
         for claim in claims:
             assert claim.billing_provider is not None
             bp = claim.billing_provider
-            assert bp.identifier == state.organization.npi
-            assert bp.last_name_or_org_name == state.organization.name
+            if claim.transaction.transaction_type == "INST":
+                assert bp == state.institutional_billing_provider
+            else:
+                assert bp.identifier == state.organization.npi
+                assert bp.last_name_or_org_name == state.organization.name
 
     def test_rendering_provider_from_roster(self):
         state = init_state(seed=42)

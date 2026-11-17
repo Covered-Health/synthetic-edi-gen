@@ -16,6 +16,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from .edi_models import Provider
+
 
 class OrganizationProfile(BaseModel):
     """The healthcare organization that produces claims."""
@@ -92,6 +94,23 @@ class PendingClaimRecord(BaseModel):
     clearinghouse_rejection: bool = False
 
 
+class ScheduledClaimRecord(BaseModel):
+    """An episode's unsubmitted PCN, independent of the evictable patient pool."""
+
+    scheduled_date: date
+    har_id: str
+    patient: PatientRecord
+    provider: ProviderRecord
+    claim_data: dict[str, Any]
+
+
+class ReturnEpisodeRecord(BaseModel):
+    patient: PatientRecord
+    family: Literal["encounter", "billing_episode"]
+    remaining: int
+    scheduled_date: date
+
+
 class RevertCandidateRecord(BaseModel):
     """A paid claim eligible for payer reversal."""
 
@@ -145,6 +164,9 @@ class FeedState(BaseModel):
     last_run_date: date | None = None
     next_transaction_id: int = 230000000
     total_claims_submitted: int = 0
+    institutional_billing_provider: Provider | None = None
+    scheduled_claims: list[ScheduledClaimRecord] = []
+    return_episodes: list[ReturnEpisodeRecord] = []
 
 
 def _require_json(path: Path) -> None:
